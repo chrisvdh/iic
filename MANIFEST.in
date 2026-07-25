@@ -1,0 +1,4 @@
+include AGENTS.md
+include THIRD_PARTY_NOTICES.md
+recursive-include configs *.json
+

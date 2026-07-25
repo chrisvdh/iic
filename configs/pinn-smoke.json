@@ -1,0 +1,50 @@
+{
+  "name": "public-pinn-smoke",
+  "mode": "smoke",
+  "device": "cpu",
+  "dtype": "float64",
+  "seeds": [0],
+  "points": [
+    {
+      "nu": 0.5,
+      "rho": 1.0
+    }
+  ],
+  "data": {
+    "nx": 8,
+    "nt": 5,
+    "n_collocation": 8
+  },
+  "model": {
+    "hidden_widths": [4],
+    "activation": "tanh",
+    "initialization": "he_normal"
+  },
+  "training": {
+    "optimizer": "gd",
+    "learning_rate": 0.001,
+    "steps": 2,
+    "momentum": 0.0,
+    "weight_decay": 0.0
+  },
+  "regularizer": {
+    "include_initialization": true,
+    "include_pde": true,
+    "include_bea": true,
+    "pde_weight": 1.0
+  },
+  "evaluation": {
+    "finite_penalty_rhos": [10.0, 100.0],
+    "tolerance": 1e-10,
+    "max_memory_gib": 0.25
+  },
+  "gate": {
+    "enabled": false,
+    "interpolation_threshold": 0.001,
+    "failure_error_threshold": 0.1,
+    "require_interpolating": 0,
+    "require_nonfailed": 0,
+    "require_failed": 0
+  }
+}
+

@@ -1,0 +1,58 @@
+{
+  "name": "public-pinn-pilot-example",
+  "mode": "pilot",
+  "device": "cpu",
+  "dtype": "float64",
+  "seeds": [0, 1],
+  "points": [
+    {
+      "nu": 0.5,
+      "rho": 0.0
+    },
+    {
+      "nu": 2.0,
+      "rho": 3.0
+    },
+    {
+      "nu": 6.0,
+      "rho": 6.0
+    }
+  ],
+  "data": {
+    "nx": 64,
+    "nt": 50,
+    "n_collocation": 500
+  },
+  "model": {
+    "hidden_widths": [16, 16],
+    "activation": "tanh",
+    "initialization": "he_normal"
+  },
+  "training": {
+    "optimizer": "gd",
+    "learning_rate": 0.001,
+    "steps": 5000,
+    "momentum": 0.0,
+    "weight_decay": 0.0
+  },
+  "regularizer": {
+    "include_initialization": true,
+    "include_pde": true,
+    "include_bea": true,
+    "pde_weight": 1.0
+  },
+  "evaluation": {
+    "finite_penalty_rhos": [10.0, 100.0],
+    "tolerance": 1e-10,
+    "max_memory_gib": 8.0
+  },
+  "gate": {
+    "enabled": true,
+    "interpolation_threshold": 0.001,
+    "failure_error_threshold": 0.1,
+    "require_interpolating": 1,
+    "require_nonfailed": 1,
+    "require_failed": 1
+  }
+}
+
