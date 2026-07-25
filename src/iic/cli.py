@@ -19,6 +19,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--config", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--curvature-only",
+        action="store_true",
+        help="Skip theta0/H0 and compute only the curvature ablation.",
+    )
     return parser
 
 
@@ -26,11 +31,18 @@ def main() -> None:
     args = _parser().parse_args()
     config = load_config(args.config)
     if args.dry_run:
-        result = validate_plan(config)
+        result = validate_plan(config, curvature_only=args.curvature_only)
     else:
-        result = run_pipeline(config, args.output)
+        result = run_pipeline(
+            config,
+            args.output,
+            curvature_only=args.curvature_only,
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
-    if result.get("run_status") == "training_gate_failed":
+    if result.get("run_status") in {
+        "training_gate_failed",
+        "partial_evaluation_failure",
+    }:
         raise SystemExit(2)
 
 

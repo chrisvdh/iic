@@ -17,7 +17,17 @@ Before changing code:
 - `nu = 0` and `nu > 0` are distinct estimands because derivative matching differs.
 - Exact BEA is available only for full-batch, zero-momentum gradient descent and
   uses coefficient `learning_rate / 4`.
+- The regularizer is the sum of all enabled initialization, PDE, explicit, and
+  BEA components; the same sum defines `theta0`, the energy gap, `Hstar`, and
+  `H0`.
+- The full hard score is
+  `log(Rstar - R0) + (logdet(KH) + logdet(Hstar) - logdet(H0)) / N - log(N)`.
+- `N` is the scalar output dimension of the constraint map.
 - The KKT Hessian differentiates one scalar Lagrangian with fixed multipliers.
+- `H0` is the unconstrained Hessian of the same regularizer at the reference
+  candidate.
+- Numerical reference candidates and numerical scores must remain distinct
+  from globally certified references and theory-valid scores.
 - Curvature-only output must never populate a full IIC field.
 - Indefinite and singular quantities are retained and flagged, never silently
   converted into certified values.
@@ -34,4 +44,3 @@ Do not add:
 
 Do not create branches. Work directly on `main` unless the repository owner
 explicitly changes this policy.
-

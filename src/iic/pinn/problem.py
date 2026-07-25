@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.func import functional_call
 
-from iic.curvature import CurvatureProblem
+from iic.curvature import EvaluationProblem
 from iic.parameters import (
     ParameterEntry,
     flatten_parameters,
@@ -196,13 +196,19 @@ def build_functions(
     )
 
 
-def curvature_problem(functions: PinnFunctions, theta_star: torch.Tensor) -> CurvatureProblem:
-    """Create the generic package-facing problem at trained parameters."""
+def evaluation_problem(
+    functions: PinnFunctions,
+    theta_star: torch.Tensor,
+) -> EvaluationProblem:
+    """Create the package-facing full-score problem at trained parameters."""
 
-    return CurvatureProblem(
+    return EvaluationProblem(
         theta_star=theta_star,
         constraint_fn=functions.constraint_fn,
         regularizer_fn=functions.regularizer_fn,
         metadata=functions.metadata,
     )
 
+
+# Compatibility name for the original curvature-only public release.
+curvature_problem = evaluation_problem

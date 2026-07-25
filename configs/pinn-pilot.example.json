@@ -42,9 +42,27 @@
     "pde_weight": 1.0
   },
   "evaluation": {
+    "mode": "full_iic",
     "finite_penalty_rhos": [10.0, 100.0],
     "tolerance": 1e-10,
-    "max_memory_gib": 8.0
+    "kkt_absolute_tolerance": 1e-7,
+    "kkt_relative_tolerance": 1e-7,
+    "max_memory_gib": 8.0,
+    "reference_solver": {
+      "solver": "gradient_descent",
+      "starts": 4,
+      "include_theta_star_start": true,
+      "random_scale": 0.1,
+      "learning_rate": 0.05,
+      "max_steps": 2000,
+      "gradient_tolerance": 1e-7,
+      "relative_gradient_tolerance": 1e-7,
+      "armijo_coefficient": 0.0001,
+      "backtrack_factor": 0.5,
+      "max_backtracks": 25,
+      "minimum_step": 1e-12,
+      "seed": 0
+    }
   },
   "gate": {
     "enabled": true,
@@ -55,4 +73,3 @@
     "require_failed": 1
   }
 }
-

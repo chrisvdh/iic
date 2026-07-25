@@ -3,7 +3,29 @@ import math
 import pytest
 import torch
 
-from iic.curvature import CurvatureProblem, evaluate_dense_curvature
+from iic.curvature import (
+    CurvatureProblem,
+    evaluate_dense_curvature,
+    evaluate_dense_iic,
+)
+from iic.reference import ReferencePoint
+
+
+def _reference(theta0, *, converged=True):
+    return ReferencePoint(
+        theta0=theta0,
+        value=0.0,
+        gradient_norm=0.0,
+        relative_stationarity=0.0,
+        converged=converged,
+        selected_start=0,
+        starts_attempted=1,
+        iterations=1,
+        function_evaluations=1,
+        status="stationary_candidate",
+        global_minimum_certified=False,
+        start_summaries=(),
+    )
 
 
 def test_dense_curvature_matches_diagonal_oracle():
@@ -45,12 +67,19 @@ def test_indefinite_hessian_is_retained_but_not_certified():
     assert result["finite_penalty_curvature"]["10"]["curvature_certified"] is False
 
 
-def test_dense_memory_guard_fails_before_hessian_construction():
+def test_dense_memory_guard_fails_before_jacobian_construction(monkeypatch):
     theta = torch.ones(4, dtype=torch.float64)
     problem = CurvatureProblem(
         theta_star=theta,
         constraint_fn=lambda candidate: candidate[:2],
         regularizer_fn=lambda candidate: candidate.square().sum(),
+    )
+    monkeypatch.setattr(
+        torch.func,
+        "jacrev",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Jacobian construction must not begin after memory refusal"
+        ),
     )
 
     with pytest.raises(MemoryError):
@@ -73,3 +102,123 @@ def test_scalar_lagrangian_includes_nonlinear_constraint_hessian():
     # mu = -2/5, H_L = diag(1 + 2*mu, 1), and A = [2, 1].
     assert result["hard_curvature"] == pytest.approx(math.log(21.0))
     assert result["kkt_stationarity_residual"] > 0.0
+
+
+def test_full_iic_matches_constant_metric_oracle():
+    theta = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    hessian = torch.diag(torch.tensor([2.0, 8.0], dtype=torch.float64))
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: candidate,
+        regularizer_fn=lambda candidate: 0.5 * candidate @ hessian @ candidate,
+    )
+
+    result = evaluate_dense_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        rhos=(10.0,),
+    )
+
+    assert result["energy_term"] == pytest.approx(math.log(17.0))
+    assert result["hessian_logdet_gap"] == pytest.approx(0.0)
+    assert result["hard_curvature"] == pytest.approx(-math.log(4.0))
+    assert result["dataset_correction"] == pytest.approx(-math.log(2.0))
+    assert result["hard_iic"] == pytest.approx(math.log(17.0 / 8.0))
+    assert result["hard_score_theory_valid"] is True
+    assert result["hard_iic_certified"] is False
+
+
+def test_theta_dependent_metric_retains_hessian_volume_gap():
+    theta = torch.tensor([1.0, 0.0], dtype=torch.float64)
+
+    def regularizer(candidate):
+        return 0.5 * candidate.square().sum() + 0.25 * candidate[0].pow(4)
+
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: torch.stack((candidate[0] - 1.0,)),
+        regularizer_fn=regularizer,
+    )
+    result = evaluate_dense_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        rhos=(10.0,),
+        interpolation_threshold=1e-12,
+    )
+
+    assert result["hard_curvature"] == pytest.approx(-math.log(4.0))
+    assert result["hessian_logdet_gap"] == pytest.approx(math.log(4.0))
+    assert result["hard_geometric_term"] == pytest.approx(0.0)
+    assert result["relative_curvature"] == pytest.approx(0.0)
+    assert result["geometric_decomposition_residual"] == pytest.approx(0.0)
+    assert result["energy_term"] == pytest.approx(math.log(0.75))
+    assert result["hard_iic"] == pytest.approx(math.log(0.75))
+
+
+def test_numerical_candidate_is_retained_when_reference_is_not_validated():
+    theta = torch.tensor([1.0], dtype=torch.float64)
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: candidate,
+        regularizer_fn=lambda candidate: 0.5 * candidate.square().sum(),
+    )
+
+    result = evaluate_dense_iic(
+        problem,
+        _reference(torch.zeros_like(theta), converged=False),
+    )
+
+    assert result["hard_iic"] is not None
+    assert result["score_status"] == "numerical_candidate"
+    assert result["reference_valid"] is False
+    assert result["hard_score_theory_valid"] is False
+
+
+def test_full_and_curvature_only_modes_share_curvature_terms():
+    theta = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    hessian = torch.diag(torch.tensor([2.0, 8.0], dtype=torch.float64))
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: candidate,
+        regularizer_fn=lambda candidate: 0.5 * candidate @ hessian @ candidate,
+    )
+
+    curvature = evaluate_dense_curvature(problem, rhos=(10.0,))
+    full = evaluate_dense_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        rhos=(10.0,),
+    )
+
+    assert full["hard_curvature"] == pytest.approx(curvature["hard_curvature"])
+    assert full["sharpness"] == pytest.approx(curvature["sharpness"])
+    assert full["finite_penalty_curvature"]["10"]["value"] == pytest.approx(
+        curvature["finite_penalty_curvature"]["10"]["value"]
+    )
+
+
+def test_indefinite_reference_hessian_withholds_full_score():
+    theta = torch.tensor([2.0, 0.0], dtype=torch.float64)
+
+    def regularizer(candidate):
+        return (
+            0.25 * candidate[0].pow(4)
+            - 0.5 * candidate[0].square()
+            + 0.5 * candidate[1].square()
+        )
+
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: torch.stack((candidate[0] - 2.0,)),
+        regularizer_fn=regularizer,
+    )
+    result = evaluate_dense_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        interpolation_threshold=1e-12,
+    )
+
+    assert result["regularizer_gap"] > 0.0
+    assert result["h0_definiteness"] == "indefinite"
+    assert result["hard_iic"] is None
+    assert result["score_status"] == "incomplete_numerical_terms"

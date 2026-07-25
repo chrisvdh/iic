@@ -47,10 +47,31 @@ class RegularizerConfig:
 
 
 @dataclass(frozen=True)
+class ReferenceConfig:
+    solver: str
+    starts: int
+    include_theta_star_start: bool
+    random_scale: float
+    learning_rate: float
+    max_steps: int
+    gradient_tolerance: float
+    relative_gradient_tolerance: float
+    armijo_coefficient: float
+    backtrack_factor: float
+    max_backtracks: int
+    minimum_step: float
+    seed: int
+
+
+@dataclass(frozen=True)
 class EvaluationConfig:
+    mode: str
     finite_penalty_rhos: tuple[float, ...]
     tolerance: float
+    kkt_absolute_tolerance: float
+    kkt_relative_tolerance: float
     max_memory_gib: float
+    reference: ReferenceConfig
 
 
 @dataclass(frozen=True)
@@ -210,17 +231,66 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
         raise ValueError("at least one regularizer component must be active")
 
     evaluation_raw = _required(raw, "evaluation", dict)
+    reference_raw = evaluation_raw.get("reference_solver", {})
+    if not isinstance(reference_raw, dict):
+        raise ValueError("evaluation.reference_solver must be an object")
+    reference = ReferenceConfig(
+        solver=str(reference_raw.get("solver", "gradient_descent")),
+        starts=int(reference_raw.get("starts", 3)),
+        include_theta_star_start=bool(
+            reference_raw.get("include_theta_star_start", True)
+        ),
+        random_scale=float(reference_raw.get("random_scale", 0.1)),
+        learning_rate=float(reference_raw.get("learning_rate", 0.1)),
+        max_steps=int(reference_raw.get("max_steps", 1000)),
+        gradient_tolerance=float(reference_raw.get("gradient_tolerance", 1e-7)),
+        relative_gradient_tolerance=float(
+            reference_raw.get("relative_gradient_tolerance", 1e-7)
+        ),
+        armijo_coefficient=float(reference_raw.get("armijo_coefficient", 1e-4)),
+        backtrack_factor=float(reference_raw.get("backtrack_factor", 0.5)),
+        max_backtracks=int(reference_raw.get("max_backtracks", 20)),
+        minimum_step=float(reference_raw.get("minimum_step", 1e-12)),
+        seed=int(reference_raw.get("seed", 0)),
+    )
+    if reference.solver != "gradient_descent":
+        raise ValueError("reference_solver.solver must be gradient_descent")
+    if reference.starts < 1 or reference.max_steps < 1:
+        raise ValueError("reference solver starts and max_steps must be positive")
+    if reference.random_scale < 0 or reference.learning_rate <= 0:
+        raise ValueError("reference random_scale must be nonnegative and learning_rate positive")
+    if reference.gradient_tolerance <= 0 or reference.relative_gradient_tolerance <= 0:
+        raise ValueError("reference gradient tolerances must be positive")
+    if not 0 < reference.armijo_coefficient < 1:
+        raise ValueError("reference armijo_coefficient must lie in (0, 1)")
+    if not 0 < reference.backtrack_factor < 1:
+        raise ValueError("reference backtrack_factor must lie in (0, 1)")
+    if reference.max_backtracks < 1 or reference.minimum_step <= 0:
+        raise ValueError("reference backtracking controls must be positive")
+
     evaluation = EvaluationConfig(
+        mode=str(evaluation_raw.get("mode", "full_iic")),
         finite_penalty_rhos=tuple(
             float(value) for value in evaluation_raw.get("finite_penalty_rhos", [10.0, 100.0])
         ),
         tolerance=float(evaluation_raw.get("tolerance", 1e-10)),
+        kkt_absolute_tolerance=float(
+            evaluation_raw.get("kkt_absolute_tolerance", 1e-7)
+        ),
+        kkt_relative_tolerance=float(
+            evaluation_raw.get("kkt_relative_tolerance", 1e-7)
+        ),
         max_memory_gib=float(evaluation_raw.get("max_memory_gib", 4.0)),
+        reference=reference,
     )
+    if evaluation.mode not in {"full_iic", "curvature_only"}:
+        raise ValueError("evaluation.mode must be full_iic or curvature_only")
     if (
         not evaluation.finite_penalty_rhos
         or any(value <= 0 for value in evaluation.finite_penalty_rhos)
         or evaluation.tolerance < 0
+        or evaluation.kkt_absolute_tolerance < 0
+        or evaluation.kkt_relative_tolerance < 0
         or evaluation.max_memory_gib <= 0
     ):
         raise ValueError("evaluation values must be positive, with nonnegative tolerance")
