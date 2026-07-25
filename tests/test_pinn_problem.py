@@ -12,8 +12,8 @@ from iic.pinn.problem import build_functions
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _setup(nu):
-    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+def _setup(nu, config_name="pinn-smoke.json"):
+    config = load_config(ROOT / "configs" / config_name)
     device = torch.device("cpu")
     dtype = torch.float64
     model = MLP(config.model.hidden_widths).to(device=device, dtype=dtype)
@@ -48,9 +48,8 @@ def test_constraint_scaling_and_regularizer_roles():
         float(sum(components.values(), theta.new_zeros(())))
     )
     assert functions.metadata["pde_role"] == "explicit_data_dependent_regularizer"
-    assert functions.metadata["bea_coefficient"] == pytest.approx(
-        config.training.learning_rate / 4.0
-    )
+    assert components["bea"].item() == 0.0
+    assert functions.metadata["bea_coefficient"] is None
 
 
 def test_nu_zero_is_a_distinct_constraint_estimand():
@@ -66,3 +65,16 @@ def test_nu_zero_is_a_distinct_constraint_estimand():
     )
     assert zero.metadata["nu_zero_policy"] == "no_periodic_derivative_matching"
     assert nonzero.metadata["nu_zero_policy"] == "periodic_derivative_matching"
+
+
+def test_bea_stress_configuration_adds_optimizer_regularizer():
+    config, _data, functions = _setup(0.5, "pinn-smoke-bea.json")
+    components = functions.component_values_fn(functions.theta)
+
+    assert components["bea"].item() > 0.0
+    assert functions.metadata["bea_coefficient"] == pytest.approx(
+        config.training.learning_rate / 4.0
+    )
+    assert functions.metadata["bea_objective"] == (
+        "actual_full_batch_training_objective"
+    )

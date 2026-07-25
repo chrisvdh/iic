@@ -38,7 +38,7 @@
   "regularizer": {
     "include_initialization": true,
     "include_pde": true,
-    "include_bea": true,
+    "include_bea": false,
     "pde_weight": 1.0
   },
   "evaluation": {

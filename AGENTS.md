@@ -17,6 +17,8 @@ Before changing code:
 - `nu = 0` and `nu > 0` are distinct estimands because derivative matching differs.
 - Exact BEA is available only for full-batch, zero-momentum gradient descent and
   uses coefficient `learning_rate / 4`.
+- Baseline smoke and pilot configurations exclude BEA. BEA must be enabled in
+  an explicitly named stress test or experimental ablation.
 - The regularizer is the sum of all enabled initialization, PDE, explicit, and
   BEA components; the same sum defines `theta0`, the energy gap, `Hstar`, and
   `H0`.

@@ -42,9 +42,12 @@ The PINN adapter uses scaled data and periodic-boundary residuals as `h`, so
 = L_{\mathrm{data}}(\theta) + L_{\mathrm{boundary}}(\theta).
 \]
 
-The PDE residual is an explicit data-dependent regularizer. When enabled, the
+The PDE residual is an explicit data-dependent regularizer. Baseline
+configurations use
+\(R=R_{\mathrm{init}}+R_{\mathrm{PDE}}\). The optional
 backward-error-analysis contribution is formed from the objective actually
-optimized by full-batch gradient descent.
+optimized by full-batch gradient descent and is evaluated as a separate
+optimizer-dependent ablation.
 
 ## Status
 
@@ -101,7 +104,28 @@ iic pinn run \
 The command validates the configuration, generates deterministic PDE data,
 trains each configured model, applies the declared training gate, solves for a
 regularizer-reference candidate, computes every dense IIC term, and writes
-manifest-complete JSON records.
+manifest-complete JSON records. This baseline deliberately excludes BEA so the
+core energy and geometry computation can be validated independently.
+
+Exercise the higher-order BEA path separately:
+
+```bash
+iic pinn run \
+  --config configs/pinn-smoke-bea.json \
+  --output runs/pinn-smoke-bea
+```
+
+The BEA smoke uses the same model, data, training trajectory, and score
+settings as the baseline. Its only mathematical difference is the addition of
+\[
+R_{\mathrm{BEA}}(\theta)
+=
+\frac{\eta}{4}
+\left\|\nabla_\theta L_{\mathrm{train}}(\theta)\right\|^2
+\]
+to the regularizer used for \(\theta_0\), \(H_\star\), \(H_0\), and the energy
+gap. It is a differentiation stress test, not the default scientific
+estimand.
 
 To compute only the curvature ablation:
 
@@ -112,8 +136,8 @@ iic pinn run \
   --curvature-only
 ```
 
-The larger `configs/pinn-pilot.example.json` is an illustrative protocol, not
-a frozen paper experiment.
+The larger `configs/pinn-pilot.example.json` is a BEA-free illustrative
+protocol, not a frozen paper experiment.
 
 ## Safety and reproducibility
 

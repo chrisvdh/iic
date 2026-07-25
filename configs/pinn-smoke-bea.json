@@ -1,5 +1,5 @@
 {
-  "name": "public-pinn-smoke",
+  "name": "public-pinn-smoke-bea",
   "mode": "smoke",
   "device": "cpu",
   "dtype": "float64",
@@ -30,7 +30,7 @@
   "regularizer": {
     "include_initialization": true,
     "include_pde": true,
-    "include_bea": false,
+    "include_bea": true,
     "pde_weight": 1.0
   },
   "evaluation": {
