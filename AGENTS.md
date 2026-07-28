@@ -33,6 +33,21 @@ Before changing code:
 - Curvature-only output must never populate a full IIC field.
 - Indefinite and singular quantities are retained and flagged, never silently
   converted into certified values.
+- Classification observation counts and scalar channel counts are separate.
+  A binary full-channel map has `2 * observations` scalar outputs and an
+  `m`-choice full-channel map has `m * observations`.
+- Full probability channels retain every class and therefore have one exact
+  softmax-normalization null direction per observation. The simplex-tangent
+  representation removes only those known structural modes and uses all
+  classes.
+- Frozen top-k partitions must be selected once and reused across compared
+  states. Target-versus-rest maps must force the target class into the
+  partition.
+- AdamW trajectories are not eligible for exact BEA. Decoupled AdamW weight
+  decay must not be described as a gradient-descent objective term.
+- A kernel computed for a supplied diagonal or operator metric is a curvature
+  primitive. It is not a complete IIC unless the energy gap and compatible
+  `Hstar`/`H0` volume terms are also computed.
 
 ## Public boundary
 
@@ -41,8 +56,10 @@ Do not add:
 - paper drafts, claims, proof plans, or unpublished results;
 - checkpoints, generated results, figures, or machine-specific paths;
 - private-repository commit hashes or Git history;
-- grokking, language-model, approximation, or distributed-sweep code before a
-  concrete public requirement exists.
+- private experiment configurations or unpublished paper-specific analysis;
+- real language-model downloads or heavyweight adapter dependencies before a
+  public base model and task are selected;
+- unvalidated FLODANCE claims or distributed-sweep machinery.
 
 Do not create branches. Work directly on `main` unless the repository owner
 explicitly changes this policy.

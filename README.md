@@ -1,9 +1,10 @@
 # IIC
 
 `iic` is an experimental Python package for computing the interpolation
-information criterion and its component diagnostics. The initial public
-surface contains a dense exact implementation and a one-command
-reaction-diffusion PINN experiment.
+information criterion and its component diagnostics. The public surface
+contains a dense exact implementation, a one-command reaction-diffusion PINN
+experiment, and lightweight infrastructure for classification trajectories
+and adapter subspaces.
 
 For a trained point \(\theta_\star\), an unconstrained regularizer reference
 \(\theta_0\), and \(N = \dim h\), the primary hard score is
@@ -53,10 +54,17 @@ optimizer-dependent ablation.
 
 This is a deliberately narrow research implementation:
 
-- dense exact differentiation and linear algebra only;
-- reaction-diffusion PINNs only;
+- dense exact full-score differentiation for reaction-diffusion PINNs;
+- blockwise exact `J H^{-1} J^T` construction for supplied diagonal or
+  operator metrics without a dense parameter Hessian or retained full
+  Jacobian;
+- seeded modular-addition training trajectories, deterministic on the tested
+  CPU path;
+- generic parameter-subspace helpers and a no-network LoRA stand-in;
+- full-channel, simplex-tangent, and frozen top-k classification maps;
 - no distributed sweep machinery;
-- no approximation backends;
+- no FLODANCE or other scalable log-determinant backend yet;
+- no real language-model integration yet;
 - nonlinear reference points are numerical multistart candidates, not
   certified global minima.
 
@@ -139,11 +147,70 @@ iic pinn run \
 The larger `configs/pinn-pilot.example.json` is a BEA-free illustrative
 protocol, not a frozen paper experiment.
 
+### Grokking trajectories
+
+Validate the seeded modular-addition training plan without training:
+
+```bash
+iic grokking train \
+  --config configs/grokking-smoke.json \
+  --dry-run
+```
+
+The corresponding smoke training command is:
+
+```bash
+iic grokking train \
+  --config configs/grokking-smoke.json
+```
+
+The harness uses an explicitly recorded layerwise Gaussian initialization and
+AdamW. It writes lightweight evaluation snapshots separately from optional
+resume checkpoints. Exact BEA is unavailable for these trajectories because
+AdamW does not satisfy the full-batch, zero-momentum gradient-descent
+assumptions.
+
+This command trains and records a trajectory only. It does not yet compute a
+grokking IIC score.
+
+## Classification kernels
+
+For \(n\) observations and \(m\) retained probability channels, the
+full-channel map contains \(mn\) scalar outputs. Thus true/false uses \(2n\)
+and four-option multiple choice uses \(4n\). A target-versus-rest partition
+retains the target as one channel and aggregates every other class into the
+second channel.
+
+Full probability channels have one exact normalization null direction per
+observation. The package records this structural nullity and also provides an
+orthonormal simplex-tangent representation of dimension \((m-1)n\). That
+projection uses all classes and removes only the known normalization modes, so
+model-dependent near-singular behaviour remains available for diagnosis.
+One-hot probability residuals cannot equal zero at finite logits, so their
+metadata marks them as near-interpolation or finite-penalty constraints rather
+than silently treating them as exact hard equalities.
+
+Top-k partitions are frozen from a declared reference state before comparing
+checkpoints. Their selection rule, reference identifier, reference-logit
+fingerprint, target fingerprint where applicable, and selected-index
+fingerprint are retained. The full 97-way modular-addition map is retained as a target
+representation, but its scalable log determinant still requires a future
+FLODANCE integration or controlled approximation.
+
+The operator-kernel API computes \(JH^{-1}J^\mathsf{T}\) for a supplied
+diagonal precision or inverse-metric operator. This is a curvature primitive,
+not automatically a complete IIC: the regularizer energy gap and compatible
+Hessian-volume terms remain separate requirements.
+
 ## Safety and reproducibility
 
 - Output directories are non-overwriting by default.
 - Device selection is explicit and occurs at runtime.
 - Full configuration and runtime provenance are recorded.
+- Evaluation snapshots and resumable optimizer checkpoints use distinct,
+  schema-versioned formats with identity, model, optimizer, and RNG-state
+  fingerprints. Resume checkpoints restore Python, NumPy, Torch CPU, and
+  available CUDA RNG streams.
 - Dense-memory estimates are checked before Hessian construction.
 - Trained and reference parameter records have independent fingerprints and
   manifests.
