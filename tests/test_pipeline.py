@@ -106,7 +106,7 @@ def test_mocked_pipeline_writes_full_iic_and_reference_artifacts(
             "hard_iic_certified": False,
         }
 
-    monkeypatch.setattr(pipeline, "evaluate_dense_iic", fake_evaluate)
+    monkeypatch.setattr(pipeline, "evaluate_iic", fake_evaluate)
 
     output = tmp_path / "run"
     summary = pipeline.run_pipeline(config, output)
@@ -126,6 +126,36 @@ def test_mocked_pipeline_writes_full_iic_and_reference_artifacts(
     assert rows[0]["hard_iic"] == pytest.approx(1.25)
 
 
+def test_training_stage_stops_before_reference_and_evaluation(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    _patch_training(monkeypatch)
+    monkeypatch.setattr(
+        pipeline,
+        "solve_reference",
+        lambda *_args, **_kwargs: pytest.fail(
+            "training stage must not solve theta0"
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_iic",
+        lambda *_args, **_kwargs: pytest.fail(
+            "training stage must not evaluate IIC"
+        ),
+    )
+
+    output = tmp_path / "training-only"
+    summary = pipeline.run_pipeline(config, output, stage="training")
+
+    assert summary["stage"] == "training"
+    assert summary["evaluation_count"] == 0
+    assert (output / "training.json").is_file()
+    assert not (output / "evaluation.json").exists()
+
+
 def test_curvature_only_mode_skips_reference_solver(tmp_path, monkeypatch):
     config = load_config(ROOT / "configs" / "pinn-smoke.json")
     _patch_training(monkeypatch)
@@ -136,7 +166,7 @@ def test_curvature_only_mode_skips_reference_solver(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "solve_reference", forbidden_reference)
     monkeypatch.setattr(
         pipeline,
-        "evaluate_dense_curvature",
+        "evaluate_curvature",
         lambda *_args, **_kwargs: {
             "estimand_kind": "curvature_only",
             "run_status": "success",
@@ -170,7 +200,7 @@ def test_training_failure_is_recorded_even_when_regime_gate_is_disabled(
     monkeypatch.setattr(pipeline, "train", fail_train)
     summary = pipeline.run_pipeline(config, tmp_path / "failed")
 
-    assert summary["run_status"] == "training_gate_failed"
+    assert summary["run_status"] == "no_successful_training_runs"
     assert summary["gate"]["failed_run_count"] == 1
     rows = json.loads((tmp_path / "failed" / "training.json").read_text())
     assert rows[0]["run_status"] == "training_failed"
@@ -190,7 +220,7 @@ def test_structured_evaluation_failure_sets_partial_run_status(
     )
     monkeypatch.setattr(
         pipeline,
-        "evaluate_dense_iic",
+        "evaluate_iic",
         lambda *_args, **_kwargs: {
             "estimand_kind": "full_iic",
             "run_status": "hessian_solve_failed",
@@ -208,3 +238,88 @@ def test_structured_evaluation_failure_sets_partial_run_status(
     rows = json.loads((output / "evaluation.json").read_text())
     assert rows[0]["training_success"] is True
     assert rows[0]["success"] is False
+
+
+def test_failed_regime_gate_does_not_censor_checkpoint_evaluation(
+    tmp_path,
+    monkeypatch,
+):
+    raw = json.loads((ROOT / "configs" / "pinn-smoke.json").read_text())
+    raw["gate"] = {
+        "enabled": True,
+        "interpolation_threshold": 0.001,
+        "failure_error_threshold": 0.1,
+        "require_interpolating": 1,
+        "require_nonfailed": 1,
+        "require_failed": 1,
+    }
+    config_path = tmp_path / "gate.json"
+    config_path.write_text(json.dumps(raw))
+    config = load_config(config_path)
+    _patch_training(monkeypatch)
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_curvature",
+        lambda *_args, **_kwargs: {
+            "estimand_kind": "curvature_only",
+            "run_status": "success",
+            "hard_iic": None,
+            "soft_iic": None,
+            "interpolation_valid": False,
+        },
+    )
+
+    output = tmp_path / "all-models"
+    summary = pipeline.run_pipeline(config, output, curvature_only=True)
+
+    assert summary["run_status"] == "success_with_gate_warning"
+    assert summary["gate"]["passed"] is False
+    assert summary["evaluation_count"] == 1
+    assert summary["noninterpolating_evaluated_count"] == 1
+
+
+def test_resume_reuses_checkpoint_and_retries_failed_evaluation(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    _patch_training(monkeypatch)
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_curvature",
+        lambda *_args, **_kwargs: {
+            "estimand_kind": "curvature_only",
+            "run_status": "hessian_solve_failed",
+            "hard_iic": None,
+            "soft_iic": None,
+        },
+    )
+    output = tmp_path / "resume"
+    first = pipeline.run_pipeline(config, output, curvature_only=True)
+    assert first["run_status"] == "partial_evaluation_failure"
+
+    def forbidden_train(*_args, **_kwargs):
+        raise AssertionError("resume must not retrain")
+
+    monkeypatch.setattr(pipeline, "train", forbidden_train)
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_curvature",
+        lambda *_args, **_kwargs: {
+            "estimand_kind": "curvature_only",
+            "run_status": "success",
+            "hard_iic": None,
+            "soft_iic": None,
+            "interpolation_valid": False,
+        },
+    )
+    second = pipeline.run_pipeline(
+        config,
+        output,
+        curvature_only=True,
+        resume=True,
+    )
+
+    assert second["run_status"] == "success"
+    rows = json.loads((output / "evaluation.json").read_text())
+    assert rows[0]["success"] is True

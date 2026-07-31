@@ -5,10 +5,13 @@ import torch
 
 from iic.curvature import (
     CurvatureProblem,
+    EvaluationOptions,
     evaluate_dense_curvature,
     evaluate_dense_iic,
+    evaluate_iic,
 )
 from iic.reference import ReferencePoint
+from iic.volume import VolumeOptions
 
 
 def _reference(theta0, *, converged=True):
@@ -86,7 +89,7 @@ def test_dense_memory_guard_fails_before_jacobian_construction(monkeypatch):
         evaluate_dense_curvature(problem, max_memory_bytes=1)
 
 
-def test_scalar_lagrangian_includes_nonlinear_constraint_hessian():
+def test_core_hessian_excludes_constraint_multiplier_curvature():
     theta = torch.tensor([1.0, 0.0], dtype=torch.float64)
 
     def constraint(candidate):
@@ -99,9 +102,10 @@ def test_scalar_lagrangian_includes_nonlinear_constraint_hessian():
     )
     result = evaluate_dense_curvature(problem, rhos=(10.0,))
 
-    # mu = -2/5, H_L = diag(1 + 2*mu, 1), and A = [2, 1].
-    assert result["hard_curvature"] == pytest.approx(math.log(21.0))
-    assert result["kkt_stationarity_residual"] > 0.0
+    # H_star is Hessian(R)=I, not a fitted Lagrangian Hessian.
+    assert result["hard_curvature"] == pytest.approx(math.log(5.0))
+    assert result["hessian_definition"] == "hessian_of_full_regularizer"
+    assert result["multiplier_used_in_hessian"] is False
 
 
 def test_full_iic_matches_constant_metric_oracle():
@@ -121,6 +125,7 @@ def test_full_iic_matches_constant_metric_oracle():
 
     assert result["energy_term"] == pytest.approx(math.log(17.0))
     assert result["hessian_logdet_gap"] == pytest.approx(0.0)
+    assert result["hessian_volume"]["spectra_reused"] is True
     assert result["hard_curvature"] == pytest.approx(-math.log(4.0))
     assert result["dataset_correction"] == pytest.approx(-math.log(2.0))
     assert result["hard_iic"] == pytest.approx(math.log(17.0 / 8.0))
@@ -168,7 +173,12 @@ def test_numerical_candidate_is_retained_when_reference_is_not_validated():
         _reference(torch.zeros_like(theta), converged=False),
     )
 
-    assert result["hard_iic"] is not None
+    assert result["hard_iic"] is None
+    assert result["hard_iic_candidate"] is not None
+    assert all(value is None for value in result["soft_iic"].values())
+    assert all(
+        value is not None for value in result["soft_iic_candidate"].values()
+    )
     assert result["score_status"] == "numerical_candidate"
     assert result["reference_valid"] is False
     assert result["hard_score_theory_valid"] is False
@@ -221,4 +231,85 @@ def test_indefinite_reference_hessian_withholds_full_score():
     assert result["regularizer_gap"] > 0.0
     assert result["h0_definiteness"] == "indefinite"
     assert result["hard_iic"] is None
-    assert result["score_status"] == "incomplete_numerical_terms"
+    assert result["score_status"] == "diagnostic_continuation_only"
+    assert result["diagnostic_continuations"]["hiic_signed_logabs"] is not None
+
+
+def test_direct_iic_hiic_and_siic_are_separate_outputs():
+    theta = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    hessian = torch.diag(torch.tensor([2.0, 8.0], dtype=torch.float64))
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: candidate[:1] - 1.0,
+        regularizer_fn=lambda candidate: 0.5 * candidate @ hessian @ candidate,
+    )
+
+    result = evaluate_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        rhos=(10.0,),
+        options=EvaluationOptions(compute_direct_iic=True),
+    )
+
+    assert result["iic_record"]["backend"] == "explicit_svd_nullspace"
+    assert result["iic"] == pytest.approx(result["hiic"])
+    assert result["siic"]["10"] != pytest.approx(result["hiic"])
+
+
+def test_hvp_cg_backend_builds_the_explicit_constraint_kernel():
+    theta = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    hessian = torch.diag(torch.tensor([2.0, 8.0], dtype=torch.float64))
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: candidate[:1] - 1.0,
+        regularizer_fn=lambda candidate: 0.5 * candidate @ hessian @ candidate,
+    )
+
+    result = evaluate_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        rhos=(10.0,),
+        options=EvaluationOptions(
+            hessian_backend="hvp",
+            inverse_backend="cg",
+            volume=VolumeOptions(
+                backend="first_order",
+                probes=4,
+                cg_tolerance=1e-12,
+            ),
+        ),
+    )
+
+    assert result["kernel_available"] is True
+    assert result["inverse_diagnostics"]["backend"] == "cg"
+    assert result["hard_curvature"] == pytest.approx(-math.log(2.0))
+    assert result["hessian_volume"]["backend"] == "first_order"
+    assert result["hiic_numerically_approximate"] is True
+
+
+def test_chunked_dense_hessian_matches_unchunked_evaluation():
+    theta = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: candidate[:1] - 1.0,
+        regularizer_fn=lambda candidate: (
+            candidate[0].pow(4) + 0.5 * candidate.square().sum()
+        ),
+    )
+
+    unchunked = evaluate_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        rhos=(10.0,),
+    )
+    chunked = evaluate_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        rhos=(10.0,),
+        options=EvaluationOptions(hessian_chunk_size=1),
+    )
+
+    assert chunked["hiic_candidate"] == pytest.approx(
+        unchunked["hiic_candidate"]
+    )
+    assert chunked["hessian_chunk_size"] == 1

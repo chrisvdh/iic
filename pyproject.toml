@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interpolating-iic"
-version = "0.3.0"
-description = "Exact dense evaluation of interpolation information criteria."
+version = "0.4.0"
+description = "Hard-limit and soft interpolation information criteria."
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.24",

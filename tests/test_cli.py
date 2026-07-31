@@ -72,6 +72,30 @@ def test_cli_curvature_only_dry_run_is_explicit(tmp_path):
     assert not output.exists()
 
 
+def test_cli_inventory_performs_no_computation_or_output_write(tmp_path):
+    output = tmp_path / "unused"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "iic.cli",
+            "pinn",
+            "inventory",
+            "--config",
+            str(ROOT / "configs" / "pinn-smoke.json"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_source_environment(),
+    )
+    result = json.loads(completed.stdout)
+    assert result["execution_profile"] == "cpu"
+    assert result["effective_workers"] == 1
+    assert result["volume_backend"] == "exact"
+    assert not output.exists()
+
+
 def test_grokking_cli_dry_run_validates_without_training(tmp_path):
     output = tmp_path / "grokking"
     completed = subprocess.run(

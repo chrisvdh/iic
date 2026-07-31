@@ -1,34 +1,32 @@
 {
-  "name": "public-pinn-pilot-example",
-  "mode": "pilot",
-  "seeds": [0, 1],
-  "points": [
-    {
-      "nu": 0.5,
-      "rho": 0.0
+  "name": "public-pinn-failure-grid-example",
+  "mode": "experiment",
+  "seeds": [0, 1, 2, 3, 4],
+  "grid": {
+    "nu": {
+      "start": 0.0,
+      "stop": 6.0,
+      "step": 0.5
     },
-    {
-      "nu": 2.0,
-      "rho": 3.0
-    },
-    {
-      "nu": 6.0,
-      "rho": 6.0
+    "rho": {
+      "start": 0.0,
+      "stop": 6.0,
+      "step": 0.5
     }
-  ],
+  },
   "data": {
-    "nx": 64,
-    "nt": 50,
-    "n_collocation": 500,
+    "nx": 256,
+    "nt": 100,
+    "n_collocation": 1000,
     "collocation_seed": 0
   },
   "model": {
-    "hidden_widths": [16, 16],
+    "hidden_widths": [50, 50, 50, 50],
     "activation": "tanh",
     "initialization": "he_normal"
   },
   "training": {
-    "device": "cpu",
+    "device": "cuda",
     "dtype": "float32",
     "weight_decay": 0.0,
     "phases": [
@@ -52,9 +50,9 @@
   },
   "evaluation": {
     "mode": "full_iic",
-    "profile": "cpu",
-    "device": "cpu",
-    "dtype": "float64",
+    "profile": "mixed",
+    "device": "cuda",
+    "dtype": "float32",
     "linear_algebra_device": "cpu",
     "linear_algebra_dtype": "float64",
     "hessian_backend": "dense",
@@ -62,13 +60,15 @@
     "volume_backend": "exact",
     "compute_direct_iic": false,
     "numerical_jitter": 0.0,
-    "workers": 1,
+    "hessian_chunk_size": 64,
+    "workers": 8,
     "workers_per_gpu": 1,
-    "cpu_threads_per_worker": 1,
+    "cpu_threads_per_worker": 4,
+    "cuda_devices": [0, 1, 2, 3, 4, 5, 6, 7],
     "finite_penalty_rhos": [10.0, 100.0],
     "tolerance": 1e-10,
-    "stationarity_absolute_tolerance": 1e-7,
-    "stationarity_relative_tolerance": 1e-7,
+    "stationarity_absolute_tolerance": 1e-07,
+    "stationarity_relative_tolerance": 1e-07,
     "max_memory_gib": 8.0,
     "reference_solver": {
       "solver": "gradient_descent",
@@ -77,8 +77,8 @@
       "random_scale": 0.1,
       "learning_rate": 0.05,
       "max_steps": 2000,
-      "gradient_tolerance": 1e-7,
-      "relative_gradient_tolerance": 1e-7,
+      "gradient_tolerance": 1e-07,
+      "relative_gradient_tolerance": 1e-07,
       "armijo_coefficient": 0.0001,
       "backtrack_factor": 0.5,
       "max_backtracks": 25,

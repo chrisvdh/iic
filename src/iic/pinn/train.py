@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import math
 import random
 import time
+from typing import Any
 
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ class TrainingResult:
     relative_error: float
     terminal_gradient_norm: float
     training_seconds: float
+    optimizer_phases: tuple[dict[str, Any], ...] = ()
 
 
 def seed_everything(seed: int) -> None:
@@ -44,29 +46,90 @@ def train(
     nu: float,
     rho: float,
 ) -> TrainingResult:
-    """Train one PINN using the objective reused by BEA evaluation."""
+    """Train one PINN with an explicitly recorded optimizer schedule."""
 
     functions = build_functions(model, data, config, nu=nu, rho=rho)
-    if config.training.optimizer == "gd":
-        optimizer: torch.optim.Optimizer = torch.optim.SGD(
-            model.parameters(),
-            lr=config.training.learning_rate,
-            momentum=0.0,
-        )
-    else:
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=config.training.learning_rate,
-        )
-
     started = time.perf_counter()
     model.train()
-    for _ in range(config.training.steps):
-        optimizer.zero_grad(set_to_none=True)
-        current_theta = flatten_parameters(model)
-        objective = functions.training_objective_fn(current_theta)
-        objective.backward()
-        optimizer.step()
+    phase_records: list[dict[str, Any]] = []
+    for phase_index, phase in enumerate(config.training.phases):
+        phase_started = time.perf_counter()
+        closure_calls = 0
+        if phase.optimizer == "gd":
+            optimizer: torch.optim.Optimizer = torch.optim.SGD(
+                model.parameters(),
+                lr=phase.learning_rate,
+                momentum=phase.momentum,
+            )
+        elif phase.optimizer == "adam":
+            optimizer = torch.optim.Adam(
+                model.parameters(),
+                lr=phase.learning_rate,
+            )
+        else:
+            optimizer = torch.optim.LBFGS(
+                model.parameters(),
+                lr=phase.learning_rate,
+                max_iter=phase.steps,
+                max_eval=phase.max_eval,
+                tolerance_grad=phase.tolerance_grad,
+                tolerance_change=phase.tolerance_change,
+                history_size=phase.history_size,
+                line_search_fn=phase.line_search_fn,
+            )
+
+        def closure() -> torch.Tensor:
+            nonlocal closure_calls
+            optimizer.zero_grad(set_to_none=True)
+            current_theta = flatten_parameters(model)
+            objective = functions.training_objective_fn(current_theta)
+            objective.backward()
+            closure_calls += 1
+            return objective
+
+        if phase.optimizer == "lbfgs":
+            optimizer.step(closure)
+            first_parameter = next(iter(model.parameters()))
+            optimizer_state = optimizer.state.get(first_parameter, {})
+            actual_iterations = int(optimizer_state.get("n_iter", 0))
+            function_evaluations = int(
+                optimizer_state.get("func_evals", closure_calls)
+            )
+        else:
+            for _ in range(phase.steps):
+                closure()
+                optimizer.step()
+            actual_iterations = phase.steps
+            function_evaluations = closure_calls
+
+        phase_records.append(
+            {
+                "phase_index": phase_index,
+                "optimizer": phase.optimizer,
+                "learning_rate": phase.learning_rate,
+                "requested_steps": phase.steps,
+                "actual_iterations": actual_iterations,
+                "function_evaluations": function_evaluations,
+                "momentum": phase.momentum,
+                "max_eval": phase.max_eval,
+                "history_size": (
+                    phase.history_size if phase.optimizer == "lbfgs" else None
+                ),
+                "tolerance_grad": (
+                    phase.tolerance_grad if phase.optimizer == "lbfgs" else None
+                ),
+                "tolerance_change": (
+                    phase.tolerance_change
+                    if phase.optimizer == "lbfgs"
+                    else None
+                ),
+                "line_search_fn": (
+                    phase.line_search_fn if phase.optimizer == "lbfgs" else None
+                ),
+                "closure_calls": closure_calls,
+                "training_seconds": time.perf_counter() - phase_started,
+            }
+        )
 
     model.eval()
     theta_star = flatten_parameters(model)
@@ -93,5 +156,5 @@ def train(
         relative_error=float(relative_error),
         terminal_gradient_norm=float(terminal_gradient_norm),
         training_seconds=float(time.perf_counter() - started),
+        optimizer_phases=tuple(phase_records),
     )
-

@@ -124,7 +124,10 @@ def build_functions(
 
     def bea_regularizer(candidate: torch.Tensor) -> torch.Tensor:
         gradient = torch.func.grad(training_objective_fn)(candidate)
-        coefficient = float(config.training.learning_rate) / 4.0
+        learning_rate = config.training.exact_bea_learning_rate
+        if learning_rate is None:
+            raise RuntimeError("BEA requested without an eligible GD phase")
+        coefficient = float(learning_rate) / 4.0
         return coefficient * gradient.square().sum()
 
     def component_values_fn(candidate: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -173,7 +176,7 @@ def build_functions(
             if enabled
         ],
         "bea_coefficient": (
-            float(config.training.learning_rate) / 4.0
+            float(config.training.exact_bea_learning_rate) / 4.0
             if config.regularizer.include_bea
             else None
         ),

@@ -1,8 +1,6 @@
 {
   "name": "public-pinn-smoke",
   "mode": "smoke",
-  "device": "cpu",
-  "dtype": "float64",
   "seeds": [0],
   "points": [
     {
@@ -13,7 +11,8 @@
   "data": {
     "nx": 8,
     "nt": 5,
-    "n_collocation": 8
+    "n_collocation": 8,
+    "collocation_seed": 0
   },
   "model": {
     "hidden_widths": [8],
@@ -21,11 +20,17 @@
     "initialization": "he_normal"
   },
   "training": {
-    "optimizer": "gd",
-    "learning_rate": 0.001,
-    "steps": 2,
-    "momentum": 0.0,
-    "weight_decay": 0.0
+    "device": "cpu",
+    "dtype": "float64",
+    "weight_decay": 0.0,
+    "phases": [
+      {
+        "optimizer": "gd",
+        "learning_rate": 0.001,
+        "steps": 2,
+        "momentum": 0.0
+      }
+    ]
   },
   "regularizer": {
     "include_initialization": true,
@@ -35,10 +40,23 @@
   },
   "evaluation": {
     "mode": "full_iic",
+    "profile": "cpu",
+    "device": "cpu",
+    "dtype": "float64",
+    "linear_algebra_device": "cpu",
+    "linear_algebra_dtype": "float64",
+    "hessian_backend": "dense",
+    "inverse_backend": "solve",
+    "volume_backend": "exact",
+    "compute_direct_iic": true,
+    "numerical_jitter": 0.0,
+    "workers": 1,
+    "workers_per_gpu": 1,
+    "cpu_threads_per_worker": 1,
     "finite_penalty_rhos": [10.0, 100.0],
     "tolerance": 1e-10,
-    "kkt_absolute_tolerance": 1e-7,
-    "kkt_relative_tolerance": 1e-7,
+    "stationarity_absolute_tolerance": 1e-7,
+    "stationarity_relative_tolerance": 1e-7,
     "max_memory_gib": 0.25,
     "reference_solver": {
       "solver": "gradient_descent",

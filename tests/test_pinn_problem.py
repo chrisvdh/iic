@@ -73,7 +73,7 @@ def test_bea_stress_configuration_adds_optimizer_regularizer():
 
     assert components["bea"].item() > 0.0
     assert functions.metadata["bea_coefficient"] == pytest.approx(
-        config.training.learning_rate / 4.0
+        config.training.exact_bea_learning_rate / 4.0
     )
     assert functions.metadata["bea_objective"] == (
         "actual_full_batch_training_objective"
