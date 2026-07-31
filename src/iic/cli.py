@@ -25,6 +25,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reuse validated training checkpoints and continue evaluation.",
     )
+    run.add_argument(
+        "--allow-source-mismatch",
+        action="store_true",
+        help=(
+            "Override source-fingerprint validation for a resume after "
+            "independent compatibility review."
+        ),
+    )
     run.add_argument("--num-shards", type=int, default=1)
     run.add_argument("--shard-index", type=int, default=0)
     run.add_argument(
@@ -51,6 +59,7 @@ def _parser() -> argparse.ArgumentParser:
         default="both",
     )
     launch.add_argument("--resume", action="store_true")
+    launch.add_argument("--allow-source-mismatch", action="store_true")
     launch.add_argument("--curvature-only", action="store_true")
     launch.add_argument("--workers", type=int)
     launch.add_argument("--num-shards", type=int)
@@ -121,6 +130,7 @@ def main() -> None:
                 hessian_chunk_size=args.hessian_chunk_size,
                 num_shards=args.num_shards,
                 shard_indices=args.shard_indices,
+                allow_source_mismatch=args.allow_source_mismatch,
             )
         elif args.action == "inventory":
             from .pinn.launcher import runtime_inventory
@@ -188,6 +198,7 @@ def main() -> None:
                     num_shards=args.num_shards,
                     shard_index=args.shard_index,
                     stage=args.stage,
+                    allow_source_mismatch=args.allow_source_mismatch,
                 )
     else:
         from .grokking.config import load_config as load_grokking_config

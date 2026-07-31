@@ -1,5 +1,6 @@
 """Exact reference computations for interpolation curvature diagnostics."""
 
+from ._version import __version__
 from .curvature import (
     CurvatureProblem,
     EvaluationOptions,
@@ -25,4 +26,3 @@ __all__ = [
     "evaluate_iic",
     "solve_reference",
 ]
-__version__ = "0.4.0"

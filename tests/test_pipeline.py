@@ -119,11 +119,18 @@ def test_mocked_pipeline_writes_full_iic_and_reference_artifacts(
     assert (output / "training.json").is_file()
     assert (output / "gate.json").is_file()
     assert (output / "evaluation.json").is_file()
+    assert (output / "stage_status.json").is_file()
     assert len(list((output / "references").glob("*_theta0.npz"))) == 1
     rows = json.loads((output / "evaluation.json").read_text())
     assert rows[0]["regularizer_component_gaps"]["bea"] > 0.0
     assert rows[0]["regularizer_component_gap_residual"] == pytest.approx(0.0)
     assert rows[0]["hard_iic"] == pytest.approx(1.25)
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["source"]["fingerprint"]
+    assert manifest["runtime"]["python"]
+    stage_status = json.loads((output / "stage_status.json").read_text())
+    assert stage_status["stages"]["training"]["status"] == "completed"
+    assert stage_status["stages"]["evaluation"]["status"] == "completed"
 
 
 def test_training_stage_stops_before_reference_and_evaluation(
@@ -323,3 +330,98 @@ def test_resume_reuses_checkpoint_and_retries_failed_evaluation(
     assert second["run_status"] == "success"
     rows = json.loads((output / "evaluation.json").read_text())
     assert rows[0]["success"] is True
+
+
+def test_resume_rejects_changed_source_unless_explicitly_overridden(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    _patch_training(monkeypatch)
+    source_a = {
+        "package_version": "test",
+        "git_revision": "a",
+        "git_dirty": False,
+        "working_tree_digest": None,
+        "fingerprint": "source-a",
+    }
+    source_b = {**source_a, "git_revision": "b", "fingerprint": "source-b"}
+    monkeypatch.setattr(pipeline, "source_identity", lambda: source_a)
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_curvature",
+        lambda *_args, **_kwargs: {
+            "estimand_kind": "curvature_only",
+            "run_status": "success",
+            "hard_iic": None,
+            "soft_iic": None,
+        },
+    )
+    output = tmp_path / "source-aware"
+    pipeline.run_pipeline(config, output, curvature_only=True)
+
+    monkeypatch.setattr(pipeline, "source_identity", lambda: source_b)
+    with pytest.raises(ValueError, match="source fingerprint"):
+        pipeline.run_pipeline(
+            config,
+            output,
+            curvature_only=True,
+            resume=True,
+        )
+
+    result = pipeline.run_pipeline(
+        config,
+        output,
+        curvature_only=True,
+        resume=True,
+        allow_source_mismatch=True,
+    )
+    assert result["run_status"] == "success"
+    status = json.loads((output / "stage_status.json").read_text())
+    assert status["resume_source_mismatch_overridden"] is True
+
+
+def test_unmocked_micro_pipeline_exercises_real_numerics(tmp_path):
+    raw = json.loads((ROOT / "configs" / "pinn-smoke.json").read_text())
+    raw["points"] = [{"nu": 0.0, "rho": 0.25}]
+    raw["data"] = {
+        "nx": 4,
+        "nt": 3,
+        "n_collocation": 2,
+        "collocation_seed": 3,
+    }
+    raw["model"]["hidden_widths"] = [2]
+    raw["training"]["phases"][0]["steps"] = 1
+    raw["evaluation"]["compute_direct_iic"] = False
+    raw["evaluation"]["finite_penalty_rhos"] = [10.0]
+    raw["evaluation"]["reference_solver"].update(
+        {
+            "starts": 1,
+            "max_steps": 2,
+            "max_backtracks": 2,
+        }
+    )
+    config_path = tmp_path / "micro.json"
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    config = load_config(config_path)
+
+    output = tmp_path / "micro-run"
+    summary = pipeline.run_pipeline(config, output)
+
+    assert summary["evaluation_count"] == 1
+    rows = json.loads((output / "evaluation.json").read_text())
+    assert rows[0]["estimand_kind"] == "full_iic"
+    assert rows[0]["constraint_count"] == 7
+    assert rows[0]["hstar_factorization"]["backend"] in {
+        "cholesky",
+        "spectral_fallback",
+    }
+    assert rows[0]["evaluation_timings_seconds"]["total"] > 0.0
+    assert rows[0]["pipeline_evaluation_timings_seconds"]["total"] > 0.0
+    assert (output / "checkpoints").is_dir()
+    assert (output / "references").is_dir()
+    status = json.loads((output / "stage_status.json").read_text())
+    assert status["stages"]["evaluation"]["status"] in {
+        "completed",
+        "completed_with_failures",
+    }

@@ -7,9 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
-import sys
 import tempfile
+import time
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -17,7 +16,9 @@ import torch
 
 from iic.curvature import EvaluationOptions, evaluate_curvature, evaluate_iic
 from iic.parameters import flatten_parameters, parameter_spec, unflatten_parameters
+from iic.provenance import runtime_identity, source_identity
 from iic.reference import ReferenceSolveOptions, solve_reference
+from iic.telemetry import PhaseTimer, peak_memory_record, reset_cuda_peak_memory
 from iic.volume import VolumeOptions
 from .config import PinnRunConfig
 from .data import make_data
@@ -46,6 +47,7 @@ def _evaluation_options(config: PinnRunConfig) -> EvaluationOptions:
         numerical_jitter=value.numerical_jitter,
         hessian_chunk_size=value.hessian_chunk_size,
         compute_direct_iic=value.compute_direct_iic,
+        reset_peak_memory=False,
         volume=VolumeOptions(
             backend=value.volume_backend,
             probes=value.volume_probes,
@@ -167,14 +169,16 @@ def _checkpoint_manifest(
     parameter_fingerprint: str,
     evaluation_mode: str,
     model_seed: int,
+    source: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "role": role,
         "parameter_fingerprint": parameter_fingerprint,
         "data_fingerprint": data_fingerprint,
         "config_fingerprint": config.fingerprint,
+        "source": source,
         "model_seed": model_seed,
         "collocation_seed": config.data.collocation_seed,
         "architecture": {
@@ -278,15 +282,18 @@ def run_manifest(
     num_shards: int = 1,
     shard_index: int = 0,
     stage: str = "both",
+    source: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     mode = evaluation_mode or config.evaluation.mode
+    source_record = source or source_identity()
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "package": "interpolating-iic",
         "estimand_kind": mode,
         "configured_estimand_kind": config.evaluation.mode,
         "estimand_overridden": mode != config.evaluation.mode,
         "config_fingerprint": config.fingerprint,
+        "source": source_record,
         "stage": stage,
         "shard": {
             "num_shards": num_shards,
@@ -294,10 +301,7 @@ def run_manifest(
         },
         "config": config.raw,
         "runtime": {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "torch": torch.__version__,
-            "numpy": np.__version__,
+            **runtime_identity(),
             "training_device": config.training.device,
             "training_dtype": config.training.dtype,
             "evaluation_device": config.evaluation.device,
@@ -380,6 +384,53 @@ def validate_plan(
     }
 
 
+def _new_stage_status(
+    *,
+    source: dict[str, Any],
+    config: PinnRunConfig,
+    requested_stage: str,
+    num_shards: int,
+    shard_index: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "source_fingerprint": source["fingerprint"],
+        "config_fingerprint": config.fingerprint,
+        "requested_stage": requested_stage,
+        "shard": {
+            "num_shards": num_shards,
+            "shard_index": shard_index,
+        },
+        "current_stage": None,
+        "run_status": "initializing",
+        "stages": {
+            "training": {"status": "pending"},
+            "evaluation": {"status": "pending"},
+        },
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _update_stage_status(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    stage: str,
+    status: str,
+    **details: Any,
+) -> None:
+    record["current_stage"] = stage if status == "in_progress" else None
+    record["run_status"] = status
+    record["stages"][stage] = {
+        **record["stages"].get(stage, {}),
+        "status": status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        **details,
+    }
+    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic_json(path, record)
+
+
 def run_pipeline(
     config: PinnRunConfig,
     output: Union[str, Path],
@@ -389,6 +440,7 @@ def run_pipeline(
     num_shards: int = 1,
     shard_index: int = 0,
     stage: str = "both",
+    allow_source_mismatch: bool = False,
 ) -> dict[str, Any]:
     """Train and evaluate a shard, retaining every successful checkpoint."""
 
@@ -405,6 +457,7 @@ def run_pipeline(
     evaluation_mode = (
         "curvature_only" if curvature_only else config.evaluation.mode
     )
+    current_source = source_identity()
     reuse_training = resume or stage == "evaluation"
     if reuse_training:
         if not output_path.is_dir():
@@ -424,6 +477,18 @@ def run_pipeline(
             "shard_index": shard_index,
         }:
             raise ValueError("resume shard identity does not match")
+        stored_source_fingerprint = manifest.get("source", {}).get(
+            "fingerprint"
+        )
+        if (
+            stored_source_fingerprint != current_source["fingerprint"]
+            and not allow_source_mismatch
+        ):
+            raise ValueError(
+                "resume source fingerprint does not match; pass "
+                "--allow-source-mismatch only after independently validating "
+                "checkpoint compatibility"
+            )
     else:
         if output_path.exists() and (
             not output_path.is_dir() or any(output_path.iterdir())
@@ -440,42 +505,89 @@ def run_pipeline(
                 num_shards=num_shards,
                 shard_index=shard_index,
                 stage=stage,
+                source=current_source,
             ),
         )
 
+    stage_status_path = output_path / "stage_status.json"
+    if reuse_training and stage_status_path.is_file():
+        stage_status = json.loads(
+            stage_status_path.read_text(encoding="utf-8")
+        )
+    else:
+        stage_status = _new_stage_status(
+            source=current_source,
+            config=config,
+            requested_stage=stage,
+            num_shards=num_shards,
+            shard_index=shard_index,
+        )
+    stage_status["resume_source_mismatch_overridden"] = bool(
+        reuse_training
+        and manifest.get("source", {}).get("fingerprint")
+        != current_source["fingerprint"]
+        and allow_source_mismatch
+    ) if reuse_training else False
+    stage_status["active_source_fingerprint"] = current_source["fingerprint"]
+    _atomic_json(stage_status_path, stage_status)
+
     training_path = output_path / "training.json"
     if reuse_training:
+        _update_stage_status(
+            stage_status_path,
+            stage_status,
+            stage="training",
+            status="reused",
+        )
         if not training_path.is_file():
             raise FileNotFoundError("resume output is missing training.json")
         training_rows = json.loads(training_path.read_text(encoding="utf-8"))
         if not isinstance(training_rows, list):
             raise ValueError("training.json must contain a list")
     else:
+        _update_stage_status(
+            stage_status_path,
+            stage_status,
+            stage="training",
+            status="in_progress",
+        )
         training_device = _device(config.training.device)
         training_dtype = _dtype(config.training.dtype)
         training_rows: list[dict[str, Any]] = []
         for point, seed in specs:
-            seed_everything(seed)
-            model = MLP(config.model.hidden_widths).to(
-                device=training_device,
-                dtype=training_dtype,
-            )
-            generator = torch.Generator(device=training_device)
-            generator.manual_seed(seed)
-            initialize_he_gaussian(model, generator=generator)
-            data = make_data(
-                point.nu,
-                point.rho,
-                nx=config.data.nx,
-                nt=config.data.nt,
-                n_collocation=config.data.n_collocation,
-                seed=config.data.collocation_seed,
-                device=training_device,
-                dtype=training_dtype,
-            )
+            reset_cuda_peak_memory(training_device)
+            run_timer = PhaseTimer()
+            run_started = time.perf_counter()
+            with run_timer.phase("model_initialization", training_device):
+                seed_everything(seed)
+                model = MLP(config.model.hidden_widths).to(
+                    device=training_device,
+                    dtype=training_dtype,
+                )
+                generator = torch.Generator(device=training_device)
+                generator.manual_seed(seed)
+                initialize_he_gaussian(model, generator=generator)
+            with run_timer.phase("data_construction", training_device):
+                data = make_data(
+                    point.nu,
+                    point.rho,
+                    nx=config.data.nx,
+                    nt=config.data.nt,
+                    n_collocation=config.data.n_collocation,
+                    seed=config.data.collocation_seed,
+                    device=training_device,
+                    dtype=training_dtype,
+                )
             run_id = f"nu-{point.nu:g}_rho-{point.rho:g}_seed-{seed}"
             try:
-                result = train(model, data, config, nu=point.nu, rho=point.rho)
+                with run_timer.phase("optimizer", training_device):
+                    result = train(
+                        model,
+                        data,
+                        config,
+                        nu=point.nu,
+                        rho=point.rho,
+                    )
                 row = {
                     "run_id": run_id,
                     "nu": point.nu,
@@ -498,26 +610,29 @@ def run_pipeline(
                     "training_dtype": config.training.dtype,
                     "data_fingerprint": data.fingerprint,
                     "config_fingerprint": config.fingerprint,
+                    "source_fingerprint": current_source["fingerprint"],
                 }
                 parameter_path = output_path / "checkpoints" / f"{run_id}.npz"
-                parameter_fingerprint = _save_parameters(
-                    parameter_path,
-                    model,
-                    result.theta_star,
-                )
-                _atomic_json(
-                    parameter_path.with_suffix(".json"),
-                    _checkpoint_manifest(
-                        run_id=run_id,
-                        role="theta_star",
-                        model=model,
-                        config=config,
-                        data_fingerprint=data.fingerprint,
-                        parameter_fingerprint=parameter_fingerprint,
-                        evaluation_mode=evaluation_mode,
-                        model_seed=seed,
-                    ),
-                )
+                with run_timer.phase("checkpoint_persistence"):
+                    parameter_fingerprint = _save_parameters(
+                        parameter_path,
+                        model,
+                        result.theta_star,
+                    )
+                    _atomic_json(
+                        parameter_path.with_suffix(".json"),
+                        _checkpoint_manifest(
+                            run_id=run_id,
+                            role="theta_star",
+                            model=model,
+                            config=config,
+                            data_fingerprint=data.fingerprint,
+                            parameter_fingerprint=parameter_fingerprint,
+                            evaluation_mode=evaluation_mode,
+                            model_seed=seed,
+                            source=current_source,
+                        ),
+                    )
             except Exception as error:
                 row = {
                     "run_id": run_id,
@@ -534,9 +649,36 @@ def run_pipeline(
                     "error": str(error),
                     "data_fingerprint": data.fingerprint,
                     "config_fingerprint": config.fingerprint,
+                    "source_fingerprint": current_source["fingerprint"],
                 }
+            row["pipeline_timings_seconds"] = {
+                **run_timer.timings,
+                "total": time.perf_counter() - run_started,
+            }
+            row["pipeline_peak_memory"] = peak_memory_record(training_device)
             training_rows.append(row)
             _atomic_json(training_path, training_rows)
+
+        training_failures = sum(
+            row.get("success") is not True for row in training_rows
+        )
+        _update_stage_status(
+            stage_status_path,
+            stage_status,
+            stage="training",
+            status=(
+                "completed"
+                if training_failures == 0
+                else "completed_with_failures"
+            ),
+            run_count=len(training_rows),
+            failure_count=training_failures,
+            completed_run_ids=[
+                row["run_id"]
+                for row in training_rows
+                if row.get("success") is True
+            ],
+        )
 
     expected_run_ids = {
         f"nu-{point.nu:g}_rho-{point.rho:g}_seed-{seed}"
@@ -570,9 +712,18 @@ def run_pipeline(
             "num_shards": num_shards,
             "shard_index": shard_index,
         }
+        stage_status["run_status"] = summary["run_status"]
+        stage_status["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_json(stage_status_path, stage_status)
         _atomic_json(output_path / "summary.json", summary)
         return summary
 
+    _update_stage_status(
+        stage_status_path,
+        stage_status,
+        stage="evaluation",
+        status="in_progress",
+    )
     evaluation_path = output_path / "evaluation.json"
     evaluation_by_id: dict[str, dict[str, Any]] = {}
     if resume and evaluation_path.is_file():
@@ -597,80 +748,118 @@ def run_pipeline(
                 raise ValueError("existing evaluation mode does not match")
             continue
 
-        model = MLP(config.model.hidden_widths).to(
-            device=evaluation_device,
-            dtype=evaluation_dtype,
+        evaluation_timer = PhaseTimer()
+        reset_cuda_peak_memory(
+            evaluation_device,
+            config.evaluation.linear_algebra_device,
         )
-        data = make_data(
-            float(training_row["nu"]),
-            float(training_row["rho"]),
-            nx=config.data.nx,
-            nt=config.data.nt,
-            n_collocation=config.data.n_collocation,
-            seed=config.data.collocation_seed,
-            device=evaluation_device,
-            dtype=evaluation_dtype,
-        )
-        failure_stage = "problem_construction"
-        reference_record: dict[str, Any] = {}
-        try:
-            parameter_path = output_path / "checkpoints" / f"{run_id}.npz"
-            parameter_manifest_path = parameter_path.with_suffix(".json")
-            parameter_manifest = json.loads(
-                parameter_manifest_path.read_text(encoding="utf-8")
-            )
-            if parameter_manifest.get("config_fingerprint") != config.fingerprint:
-                raise ValueError("checkpoint configuration fingerprint does not match")
-            if parameter_manifest.get("data_fingerprint") != data.fingerprint:
-                raise ValueError("checkpoint data fingerprint does not match")
-            theta_star = _load_parameters(
-                parameter_path,
-                model,
-                expected_fingerprint=parameter_manifest[
-                    "parameter_fingerprint"
-                ],
+        evaluation_started = time.perf_counter()
+        with evaluation_timer.phase(
+            "model_and_data_construction",
+            evaluation_device,
+        ):
+            model = MLP(config.model.hidden_widths).to(
                 device=evaluation_device,
                 dtype=evaluation_dtype,
             )
-            functions = build_functions(
-                model,
-                data,
-                config,
-                nu=float(training_row["nu"]),
-                rho=float(training_row["rho"]),
+            data = make_data(
+                float(training_row["nu"]),
+                float(training_row["rho"]),
+                nx=config.data.nx,
+                nt=config.data.nt,
+                n_collocation=config.data.n_collocation,
+                seed=config.data.collocation_seed,
+                device=evaluation_device,
+                dtype=evaluation_dtype,
             )
-            problem = evaluation_problem(functions, theta_star)
-            star_components = {
-                name: float(value.detach())
-                for name, value in functions.component_values_fn(
-                    theta_star
-                ).items()
-            }
+        failure_stage = "problem_construction"
+        reference_record: dict[str, Any] = {}
+        try:
+            with evaluation_timer.phase("checkpoint_load"):
+                parameter_path = output_path / "checkpoints" / f"{run_id}.npz"
+                parameter_manifest_path = parameter_path.with_suffix(".json")
+                parameter_manifest = json.loads(
+                    parameter_manifest_path.read_text(encoding="utf-8")
+                )
+                if (
+                    parameter_manifest.get("config_fingerprint")
+                    != config.fingerprint
+                ):
+                    raise ValueError(
+                        "checkpoint configuration fingerprint does not match"
+                    )
+                if parameter_manifest.get("data_fingerprint") != data.fingerprint:
+                    raise ValueError("checkpoint data fingerprint does not match")
+                checkpoint_source = parameter_manifest.get("source", {}).get(
+                    "fingerprint"
+                )
+                if (
+                    checkpoint_source != current_source["fingerprint"]
+                    and not allow_source_mismatch
+                ):
+                    raise ValueError(
+                        "checkpoint source fingerprint does not match"
+                    )
+                theta_star = _load_parameters(
+                    parameter_path,
+                    model,
+                    expected_fingerprint=parameter_manifest[
+                        "parameter_fingerprint"
+                    ],
+                    device=evaluation_device,
+                    dtype=evaluation_dtype,
+                )
+            with evaluation_timer.phase(
+                "problem_construction",
+                evaluation_device,
+            ):
+                functions = build_functions(
+                    model,
+                    data,
+                    config,
+                    nu=float(training_row["nu"]),
+                    rho=float(training_row["rho"]),
+                )
+                problem = evaluation_problem(functions, theta_star)
+                star_components = {
+                    name: float(value.detach())
+                    for name, value in functions.component_values_fn(
+                        theta_star
+                    ).items()
+                }
             if evaluation_mode == "full_iic":
                 failure_stage = "reference_solve"
                 reference_config = config.evaluation.reference
-                reference = solve_reference(
-                    functions.regularizer_fn,
-                    theta_star,
-                    ReferenceSolveOptions(
-                        starts=reference_config.starts,
-                        include_theta_star_start=(
-                            reference_config.include_theta_star_start
+                with evaluation_timer.phase(
+                    "reference_solve",
+                    evaluation_device,
+                ):
+                    reference = solve_reference(
+                        functions.regularizer_fn,
+                        theta_star,
+                        ReferenceSolveOptions(
+                            starts=reference_config.starts,
+                            include_theta_star_start=(
+                                reference_config.include_theta_star_start
+                            ),
+                            random_scale=reference_config.random_scale,
+                            learning_rate=reference_config.learning_rate,
+                            max_steps=reference_config.max_steps,
+                            gradient_tolerance=(
+                                reference_config.gradient_tolerance
+                            ),
+                            relative_gradient_tolerance=(
+                                reference_config.relative_gradient_tolerance
+                            ),
+                            armijo_coefficient=(
+                                reference_config.armijo_coefficient
+                            ),
+                            backtrack_factor=reference_config.backtrack_factor,
+                            max_backtracks=reference_config.max_backtracks,
+                            minimum_step=reference_config.minimum_step,
+                            seed=reference_config.seed,
                         ),
-                        random_scale=reference_config.random_scale,
-                        learning_rate=reference_config.learning_rate,
-                        max_steps=reference_config.max_steps,
-                        gradient_tolerance=reference_config.gradient_tolerance,
-                        relative_gradient_tolerance=(
-                            reference_config.relative_gradient_tolerance
-                        ),
-                        armijo_coefficient=reference_config.armijo_coefficient,
-                        backtrack_factor=reference_config.backtrack_factor,
-                        max_backtracks=reference_config.max_backtracks,
-                        minimum_step=reference_config.minimum_step,
-                        seed=reference_config.seed,
-                    ),
-                )
+                    )
                 reference_record = reference.to_record()
                 failure_stage = "reference_persistence"
                 reference_path = (
@@ -678,45 +867,54 @@ def run_pipeline(
                     / "references"
                     / f"{training_row['run_id']}_theta0.npz"
                 )
-                reference_fingerprint = _save_parameters(
-                    reference_path,
-                    model,
-                    reference.theta0,
-                )
-                _atomic_json(
-                    reference_path.with_suffix(".json"),
-                    {
-                        **_checkpoint_manifest(
-                            run_id=run_id,
-                            role="theta0_reference_candidate",
-                            model=model,
-                            config=config,
-                            data_fingerprint=training_row["data_fingerprint"],
-                            parameter_fingerprint=reference_fingerprint,
-                            evaluation_mode=evaluation_mode,
-                            model_seed=int(training_row["model_seed"]),
-                        ),
-                        **reference.to_record(),
-                    },
-                )
+                with evaluation_timer.phase("reference_persistence"):
+                    reference_fingerprint = _save_parameters(
+                        reference_path,
+                        model,
+                        reference.theta0,
+                    )
+                    _atomic_json(
+                        reference_path.with_suffix(".json"),
+                        {
+                            **_checkpoint_manifest(
+                                run_id=run_id,
+                                role="theta0_reference_candidate",
+                                model=model,
+                                config=config,
+                                data_fingerprint=training_row[
+                                    "data_fingerprint"
+                                ],
+                                parameter_fingerprint=reference_fingerprint,
+                                evaluation_mode=evaluation_mode,
+                                model_seed=int(training_row["model_seed"]),
+                                source=current_source,
+                            ),
+                            **reference.to_record(),
+                        },
+                    )
                 failure_stage = "full_iic_evaluation"
-                curvature = evaluate_iic(
-                    problem,
-                    reference,
-                    rhos=config.evaluation.finite_penalty_rhos,
-                    tolerance=config.evaluation.tolerance,
-                    max_memory_bytes=config.max_memory_bytes,
-                    interpolation_threshold=(
-                        config.gate.interpolation_threshold
-                    ),
-                    stationarity_absolute_tolerance=(
-                        config.evaluation.stationarity_absolute_tolerance
-                    ),
-                    stationarity_relative_tolerance=(
-                        config.evaluation.stationarity_relative_tolerance
-                    ),
-                    options=_evaluation_options(config),
-                )
+                with evaluation_timer.phase(
+                    "iic_evaluation",
+                    evaluation_device,
+                    config.evaluation.linear_algebra_device,
+                ):
+                    curvature = evaluate_iic(
+                        problem,
+                        reference,
+                        rhos=config.evaluation.finite_penalty_rhos,
+                        tolerance=config.evaluation.tolerance,
+                        max_memory_bytes=config.max_memory_bytes,
+                        interpolation_threshold=(
+                            config.gate.interpolation_threshold
+                        ),
+                        stationarity_absolute_tolerance=(
+                            config.evaluation.stationarity_absolute_tolerance
+                        ),
+                        stationarity_relative_tolerance=(
+                            config.evaluation.stationarity_relative_tolerance
+                        ),
+                        options=_evaluation_options(config),
+                    )
                 curvature = {**reference_record, **curvature}
                 reference_components = {
                     name: float(value.detach())
@@ -743,13 +941,18 @@ def run_pipeline(
                     )
             else:
                 failure_stage = "curvature_evaluation"
-                curvature = evaluate_curvature(
-                    problem,
-                    rhos=config.evaluation.finite_penalty_rhos,
-                    tolerance=config.evaluation.tolerance,
-                    max_memory_bytes=config.max_memory_bytes,
-                    options=_evaluation_options(config),
-                )
+                with evaluation_timer.phase(
+                    "iic_evaluation",
+                    evaluation_device,
+                    config.evaluation.linear_algebra_device,
+                ):
+                    curvature = evaluate_curvature(
+                        problem,
+                        rhos=config.evaluation.finite_penalty_rhos,
+                        tolerance=config.evaluation.tolerance,
+                        max_memory_bytes=config.max_memory_bytes,
+                        options=_evaluation_options(config),
+                    )
                 curvature["regularizer_components_star"] = star_components
             curvature.setdefault(
                 "interpolation_threshold",
@@ -808,6 +1011,17 @@ def run_pipeline(
                 "linear_algebra_device": config.evaluation.linear_algebra_device,
                 "linear_algebra_dtype": config.evaluation.linear_algebra_dtype,
             }
+        evaluation_by_id[run_id]["pipeline_evaluation_timings_seconds"] = {
+            **evaluation_timer.timings,
+            "total": time.perf_counter() - evaluation_started,
+        }
+        evaluation_by_id[run_id]["pipeline_peak_memory"] = peak_memory_record(
+            evaluation_device,
+            config.evaluation.linear_algebra_device,
+        )
+        evaluation_by_id[run_id]["source_fingerprint"] = current_source[
+            "fingerprint"
+        ]
         ordered_evaluations = [
             evaluation_by_id[row["run_id"]]
             for row in training_rows
@@ -877,5 +1091,25 @@ def run_pipeline(
         "num_shards": num_shards,
         "shard_index": shard_index,
     }
+    _update_stage_status(
+        stage_status_path,
+        stage_status,
+        stage="evaluation",
+        status=(
+            "completed"
+            if evaluation_failure_count == 0
+            else "completed_with_failures"
+        ),
+        run_count=len(evaluation_rows),
+        failure_count=evaluation_failure_count,
+        completed_run_ids=[
+            row["run_id"]
+            for row in evaluation_rows
+            if row.get("success") is True
+        ],
+    )
+    stage_status["run_status"] = run_status
+    stage_status["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic_json(stage_status_path, stage_status)
     _atomic_json(output_path / "summary.json", summary)
     return summary

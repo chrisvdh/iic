@@ -247,13 +247,18 @@ and does not claim to certify a global minimum.
 The constraint kernel \(K_H\) is always materialised as an \(N\times N\)
 matrix and its determinant is evaluated explicitly. Applying
 \(H_\star^{-1}\) to the Jacobian right-hand sides can use a dense solve, an
-explicitly requested Moore--Penrose pseudoinverse, or matrix-free CG. CG stops
-and records nonpositive curvature instead of treating an indefinite system as
-SPD.
+explicitly requested Moore--Penrose pseudoinverse, or matrix-free CG. The
+dense exact path attempts a Cholesky factorisation first and reuses it for both
+the log determinant and kernel solve. If Cholesky fails, the package computes
+the full spectrum, records the failure, and retains the existing signed or
+pseudodeterminant continuation where possible. It never turns that fallback
+into a positive-definite certification. CG stops and records nonpositive
+curvature instead of treating an indefinite system as SPD.
 
 The Hessian-volume gap has four backends:
 
-- `exact`: dense Hessians with explicit spectral diagnostics;
+- `exact`: dense Hessians with Cholesky-first exact factors and spectral
+  diagnostics on fallback;
 - `first_order`: \(\operatorname{tr}[H_0^{-1}(H_\star-H_0)]\);
 - `path`: quadrature of the log-determinant derivative along the straight
   Hessian path from \(H_0\) to \(H_\star\);
@@ -394,7 +399,12 @@ Run the remaining zero-based shard indices with the same `--num-shards`.
 Training rows and parameter checkpoints are written before dense evaluation.
 If evaluation is interrupted, rerun the same command with `--resume`; validated
 successful rows are skipped and failed or missing evaluations are retried
-without retraining.
+without retraining. A resume also requires the current source fingerprint to
+match the source that wrote the shard and its parameter checkpoints. The
+fingerprint includes the Git revision and, for a dirty checkout, a digest of
+the working-tree changes. `--allow-source-mismatch` is an explicit emergency
+override for a compatibility decision made outside the package; it should not
+be part of a routine cluster command.
 
 For a single full-size timing run on one GPU, shard 420 is the grid member
 \((\nu,\rho,\mathrm{seed})=(3,3,0)\):
@@ -447,7 +457,12 @@ iic pinn run \
 
 Every checkpoint, reference, and JSON aggregate is written atomically. On an
 eviction-prone machine, point `--output` at durable network-mounted storage;
-the package does not assume an SSH endpoint that has not been configured.
+the package does not assume an SSH endpoint that has not been configured. Each
+shard writes `stage_status.json` before and after training and evaluation.
+The multi-process launcher streams each worker's standard output and error to
+`logs/shard-NNNN/<stage>.stdout.log` and
+`logs/shard-NNNN/<stage>.stderr.log` under the launch root, so progress and
+failures remain inspectable while a worker is still running.
 
 Inspect resource mapping without training or evaluation:
 
@@ -519,7 +534,11 @@ stationarity, reference, rank, and definiteness statuses.
 - Training and evaluation device/precision are explicit and independent.
 - Model and collocation seeds are explicit and independent.
 - Full configuration and runtime provenance are recorded.
+- Git revision, dirty-tree digest, package version, CUDA runtime, accelerator
+  identity, and source fingerprint are recorded where available.
 - Dense-memory estimates are checked before Hessian construction.
+- Evaluator and pipeline phase timings, process peak RSS, and resettable CUDA
+  allocator peaks are recorded with each run.
 - Trained and reference parameter records have independent fingerprints and
   manifests.
 - Reference convergence, constrained stationarity, interpolation,
@@ -527,7 +546,7 @@ stationarity, reference, rank, and definiteness statuses.
 - Checkpoints and generated results are ignored by Git.
 - Resumed PINN evaluation accepts only the package's non-pickle NPZ parameter
   format after validating parameter names, shapes, data identity, configuration
-  identity, and content fingerprints.
+  identity, source identity, and content fingerprints.
 
 ## Literature
 

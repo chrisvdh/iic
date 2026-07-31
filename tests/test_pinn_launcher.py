@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,6 +45,10 @@ def test_selected_shards_preserve_indices_and_resume_only_existing(
     by_index = {
         int(command[command.index("--shard-index") + 1]): command
         for command in commands
+        if "--shard-index" in command
     }
     assert "--resume" in by_index[0]
     assert "--resume" not in by_index[420]
+    results = json.loads((output / "launcher_results.json").read_text())
+    assert all(Path(row["stdout_log"]).is_file() for row in results)
+    assert all(Path(row["stderr_log"]).is_file() for row in results)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interpolating-iic"
-version = "0.4.0"
+dynamic = ["version"]
 description = "Hard-limit and soft interpolation information criteria."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -24,6 +24,9 @@ iic = "iic.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "iic._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

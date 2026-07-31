@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import torch
 
+from iic.provenance import source_identity
 from .config import PinnRunConfig
 from .pipeline import _atomic_json
 
@@ -30,6 +31,7 @@ def launch_shards(
     hessian_chunk_size: Optional[int] = None,
     num_shards: Optional[int] = None,
     shard_indices: Optional[list[int]] = None,
+    allow_source_mismatch: bool = False,
 ) -> dict[str, Any]:
     """Launch one isolated process per shard with explicit resource mapping."""
 
@@ -90,6 +92,7 @@ def launch_shards(
     _atomic_json(
         output / "launcher_manifest.json",
         {
+            "schema_version": 2,
             "stage": stage,
             "num_shards": shard_count,
             "selected_shards": selected_shards,
@@ -99,6 +102,8 @@ def launch_shards(
             "runtime_overrides_do_not_change_config_fingerprint": True,
             "assignments": assignments,
             "config_fingerprint": config.fingerprint,
+            "source": source_identity(),
+            "allow_source_mismatch": allow_source_mismatch,
         },
     )
 
@@ -122,6 +127,8 @@ def launch_shards(
         ]
         if resume and Path(assignment["output"]).exists():
             command.append("--resume")
+        if allow_source_mismatch:
+            command.append("--allow-source-mismatch")
         if curvature_only:
             command.append("--curvature-only")
         if hessian_chunk_size is not None:
@@ -132,22 +139,37 @@ def launch_shards(
         threads = str(cpu_threads)
         environment["OMP_NUM_THREADS"] = threads
         environment["MKL_NUM_THREADS"] = threads
+        environment["PYTHONUNBUFFERED"] = "1"
         if assignment["cuda_device"] is not None:
             environment["CUDA_VISIBLE_DEVICES"] = str(
                 assignment["cuda_device"]
             )
-        completed = subprocess.run(
-            command,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
+        log_directory = (
+            output
+            / "logs"
+            / f"shard-{assignment['shard_index']:04d}"
         )
+        log_directory.mkdir(parents=True, exist_ok=True)
+        stdout_path = log_directory / f"{stage}.stdout.log"
+        stderr_path = log_directory / f"{stage}.stderr.log"
+        mode = "a" if resume else "w"
+        with (
+            stdout_path.open(mode, encoding="utf-8") as stdout_handle,
+            stderr_path.open(mode, encoding="utf-8") as stderr_handle,
+        ):
+            completed = subprocess.run(
+                command,
+                env=environment,
+                check=False,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                text=True,
+            )
         return {
             **assignment,
             "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
+            "stdout_log": str(stdout_path),
+            "stderr_log": str(stderr_path),
         }
 
     results: list[dict[str, Any]] = []

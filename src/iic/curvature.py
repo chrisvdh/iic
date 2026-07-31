@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 import math
+import time
 from typing import Any, Optional
 
 import torch
 
 from .reference import ReferencePoint
+from .telemetry import PhaseTimer, peak_memory_record, reset_cuda_peak_memory
 from .volume import VolumeOptions, conjugate_gradient, estimate_logdet_ratio
 
 TensorFn = Callable[[torch.Tensor], torch.Tensor]
@@ -39,6 +41,7 @@ class EvaluationOptions:
     numerical_jitter: float = 0.0
     hessian_chunk_size: Optional[int] = None
     compute_direct_iic: bool = False
+    reset_peak_memory: bool = True
     volume: VolumeOptions = field(default_factory=VolumeOptions)
 
 
@@ -51,7 +54,9 @@ def _torch_dtype(name: str) -> torch.dtype:
 
 
 def _spectral_summary(matrix: torch.Tensor, tolerance: float) -> dict[str, Any]:
-    eigenvalues = torch.linalg.eigvalsh(0.5 * (matrix + matrix.T))
+    eigenvalues = torch.linalg.eigvalsh(
+        0.5 * (matrix + matrix.T)
+    ).detach()
     nonzero = torch.abs(eigenvalues) > tolerance
     nonsingular = bool(torch.all(nonzero))
     if bool(torch.all(eigenvalues > tolerance)):
@@ -61,7 +66,7 @@ def _spectral_summary(matrix: torch.Tensor, tolerance: float) -> dict[str, Any]:
     else:
         status = "singular"
     pseudo = (
-        float(torch.log(torch.abs(eigenvalues[nonzero])).sum())
+        float(torch.log(torch.abs(eigenvalues[nonzero])).sum().detach())
         if bool(torch.any(nonzero))
         else 0.0
     )
@@ -84,6 +89,51 @@ def _spectral_summary(matrix: torch.Tensor, tolerance: float) -> dict[str, Any]:
         "pseudo_rank": int(nonzero.sum()),
         "nonsingular_verified": nonsingular,
         "eigenvalues": eigenvalues,
+    }
+
+
+def _factorize_dense(
+    matrix: torch.Tensor,
+    tolerance: float,
+) -> tuple[dict[str, Any], Optional[torch.Tensor], dict[str, Any]]:
+    """Use Cholesky for the SPD path and spectra only for its fallback."""
+
+    symmetric = 0.5 * (matrix + matrix.T)
+    factor, info = torch.linalg.cholesky_ex(symmetric, check_errors=False)
+    cholesky_succeeded = int(info.max().item()) == 0
+    if cholesky_succeeded:
+        logdet = float(
+            (2.0 * torch.log(torch.diagonal(factor)).sum()).detach()
+        )
+        size = matrix.shape[0]
+        summary = {
+            "status": "positive_definite",
+            "positive_definite_verified": True,
+            "min_eigenvalue": None,
+            "max_eigenvalue": None,
+            "num_negative": 0,
+            "num_near_zero": 0,
+            "num_nonpositive": 0,
+            "determinant_sign": 1,
+            "logdet": logdet,
+            "logabsdet": logdet,
+            "pseudo_logabsdet": logdet,
+            "pseudo_rank": size,
+            "nonsingular_verified": True,
+            "eigenvalues": None,
+        }
+        return summary, factor, {
+            "backend": "cholesky",
+            "cholesky_succeeded": True,
+            "spectral_fallback_used": False,
+        }
+    summary = _spectral_summary(symmetric, tolerance)
+    return summary, None, {
+        "backend": "spectral_fallback",
+        "cholesky_succeeded": False,
+        "cholesky_info": int(info.max().item()),
+        "spectral_fallback_used": True,
+        "fallback_reason": "matrix_not_numerically_positive_definite",
     }
 
 
@@ -154,15 +204,24 @@ def _solve_kernel(
     a_star: torch.Tensor,
     *,
     hstar: Optional[torch.Tensor],
+    hstar_cholesky: Optional[torch.Tensor],
     hstar_matvec: Callable[[torch.Tensor], torch.Tensor],
     options: EvaluationOptions,
 ) -> tuple[Optional[torch.Tensor], dict[str, Any]]:
     if options.inverse_backend == "solve":
         if hstar is None:
             raise ValueError("dense solve requires an explicit Hessian")
-        solved = torch.linalg.solve(hstar, a_star.T)
+        solved = (
+            torch.cholesky_solve(a_star.T, hstar_cholesky)
+            if hstar_cholesky is not None
+            else torch.linalg.solve(hstar, a_star.T)
+        )
         return a_star @ solved, {
-            "backend": "solve",
+            "backend": (
+                "cholesky_solve"
+                if hstar_cholesky is not None
+                else "solve"
+            ),
             "available": True,
             "column_records": [],
         }
@@ -221,9 +280,11 @@ def _build_star(
     max_memory_bytes: Optional[int],
     options: EvaluationOptions,
     hessian_count: int,
+    timer: PhaseTimer,
 ) -> dict[str, Any]:
     theta = problem.theta_star.detach().clone().requires_grad_(True)
-    constraints = problem.constraint_fn(theta)
+    with timer.phase("constraint_evaluation", theta.device):
+        constraints = problem.constraint_fn(theta)
     if constraints.ndim != 1 or constraints.numel() == 0:
         raise ValueError("constraint_fn must return a nonempty vector")
     if options.hessian_backend == "dense":
@@ -242,43 +303,50 @@ def _build_star(
             + 8 * theta.numel()
         )
 
-    a_native = torch.func.jacrev(problem.constraint_fn)(theta)
+    with timer.phase("constraint_jacobian", theta.device):
+        a_native = torch.func.jacrev(problem.constraint_fn)(theta)
     if a_native.shape != (constraints.numel(), theta.numel()):
         raise RuntimeError("constraint Jacobian has an unexpected shape")
     la_device = torch.device(options.linear_algebra_device)
     if la_device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("linear algebra requests CUDA but CUDA is unavailable")
     la_dtype = _torch_dtype(options.linear_algebra_dtype)
-    a_star = a_native.to(device=la_device, dtype=la_dtype)
-    point = theta.to(device=la_device, dtype=la_dtype).requires_grad_(True)
-
-    def regularizer_la(candidate: torch.Tensor) -> torch.Tensor:
-        return problem.regularizer_fn(
-            candidate.to(device=theta.device, dtype=theta.dtype)
-        ).to(device=la_device, dtype=la_dtype)
-
+    # These derivative arrays are terminal numerical inputs. Detaching them
+    # avoids retaining higher-order autograd graphs during factorization.
+    a_star = a_native.to(device=la_device, dtype=la_dtype).detach()
     # If devices differ, autograd cannot traverse the copy back to the original
     # closure. Build Hessian/HVP natively, then transfer the numerical object.
     def native_hvp(vector: torch.Tensor) -> torch.Tensor:
         native_vector = vector.to(device=theta.device, dtype=theta.dtype)
         product = _hvp(problem.regularizer_fn, theta, native_vector)
-        return product.to(device=la_device, dtype=la_dtype)
+        return product.to(device=la_device, dtype=la_dtype).detach()
 
     hstar: Optional[torch.Tensor] = None
+    hstar_cholesky: Optional[torch.Tensor] = None
+    h_factorization = {
+        "backend": "not_explicitly_evaluated",
+        "cholesky_succeeded": False,
+        "spectral_fallback_used": False,
+    }
     if options.hessian_backend == "dense":
-        hstar = _dense_hessian(
-            problem.regularizer_fn,
-            theta,
-            chunk_size=options.hessian_chunk_size,
-        )
-        hstar = hstar.to(device=la_device, dtype=la_dtype)
-        hstar = 0.5 * (hstar + hstar.T)
-        if options.numerical_jitter:
-            hstar = hstar + options.numerical_jitter * torch.eye(
-                hstar.shape[0], device=la_device, dtype=la_dtype
+        with timer.phase("hstar_construction", theta.device, la_device):
+            hstar = _dense_hessian(
+                problem.regularizer_fn,
+                theta,
+                chunk_size=options.hessian_chunk_size,
             )
+            hstar = hstar.to(device=la_device, dtype=la_dtype).detach()
+            hstar = 0.5 * (hstar + hstar.T)
+            if options.numerical_jitter:
+                hstar = hstar + options.numerical_jitter * torch.eye(
+                    hstar.shape[0], device=la_device, dtype=la_dtype
+                )
         hstar_matvec = lambda vector: hstar @ vector
-        h_summary = _spectral_summary(hstar, tolerance)
+        with timer.phase("hstar_factorization", la_device):
+            h_summary, hstar_cholesky, h_factorization = _factorize_dense(
+                hstar,
+                tolerance,
+            )
     else:
         hstar_matvec = native_hvp
         if options.numerical_jitter:
@@ -294,18 +362,24 @@ def _build_star(
             "pseudo_logabsdet": None,
         }
 
-    kernel, inverse = _solve_kernel(
-        a_star,
-        hstar=hstar,
-        hstar_matvec=hstar_matvec,
-        options=options,
-    )
+    with timer.phase("constraint_kernel_solve", la_device):
+        kernel, inverse = _solve_kernel(
+            a_star,
+            hstar=hstar,
+            hstar_cholesky=hstar_cholesky,
+            hstar_matvec=hstar_matvec,
+            options=options,
+        )
     kernel_summary = None
     if kernel is not None:
-        kernel = 0.5 * (kernel + kernel.T)
-        kernel_summary = _spectral_summary(kernel, tolerance)
-    sharpness = 0.5 * (a_star @ a_star.T + (a_star @ a_star.T).T)
-    singular_values = torch.linalg.svdvals(a_star)
+        with timer.phase("constraint_kernel_spectral", la_device):
+            kernel = 0.5 * (kernel + kernel.T)
+            kernel_summary = _spectral_summary(kernel, tolerance)
+    with timer.phase("constraint_jacobian_spectral", la_device):
+        gram = a_star @ a_star.T
+        sharpness = 0.5 * (gram + gram.T)
+        sharpness_summary = _spectral_summary(sharpness, tolerance)
+        singular_values = torch.linalg.svdvals(a_star).detach()
     rank = int((singular_values > tolerance).sum())
     return {
         "theta": theta,
@@ -314,10 +388,12 @@ def _build_star(
         "hstar": hstar,
         "hstar_matvec": hstar_matvec,
         "hstar_summary": h_summary,
+        "hstar_cholesky": hstar_cholesky,
+        "hstar_factorization": h_factorization,
         "kernel": kernel,
         "kernel_summary": kernel_summary,
         "inverse": inverse,
-        "sharpness_summary": _spectral_summary(sharpness, tolerance),
+        "sharpness_summary": sharpness_summary,
         "rank": rank,
         "full_row_rank": rank == a_star.shape[0],
         "sigma_min": float(singular_values.min()),
@@ -325,6 +401,7 @@ def _build_star(
         "memory_estimate": estimate,
         "la_device": la_device,
         "la_dtype": la_dtype,
+        "timer": timer,
     }
 
 
@@ -360,11 +437,18 @@ def _base_record(
         "normalization_convention": "constraint_map_dimension",
         "constraint_count": int(n),
         "parameter_count": int(star["a"].shape[1]),
-        "constraint_norm": float(torch.linalg.vector_norm(star["constraints"])),
-        "interp_residual": float(
-            torch.linalg.vector_norm(star["constraints"]) / math.sqrt(2.0)
+        "constraint_norm": float(
+            torch.linalg.vector_norm(star["constraints"]).detach()
         ),
-        "regularizer_value": float(problem.regularizer_fn(star["theta"])),
+        "interp_residual": float(
+            (
+                torch.linalg.vector_norm(star["constraints"])
+                / math.sqrt(2.0)
+            ).detach()
+        ),
+        "regularizer_value": float(
+            problem.regularizer_fn(star["theta"]).detach()
+        ),
         "dense_memory_estimate_bytes": star["memory_estimate"],
         "hessian_definition": "hessian_of_full_regularizer",
         "multiplier_used_in_hessian": False,
@@ -374,9 +458,11 @@ def _base_record(
         "linear_algebra_device": str(star["la_device"]),
         "linear_algebra_dtype": str(star["la_dtype"]).replace("torch.", ""),
         "numerical_jitter": options.numerical_jitter,
+        "peak_memory_reset_at_evaluation_start": options.reset_peak_memory,
         "hessian_chunk_size": options.hessian_chunk_size,
         "h_definiteness": h["status"],
         "h_positive_definite_verified": h["positive_definite_verified"],
+        "hstar_factorization": star["hstar_factorization"],
         "logdet_Hstar": h.get("logdet"),
         "logabsdet_Hstar": h.get("logabsdet"),
         "pseudo_logabsdet_Hstar": h.get("pseudo_logabsdet"),
@@ -417,6 +503,7 @@ def _base_record(
         "soft_iic_candidate": None,
         "diagnostic_continuations": {},
         "metadata": dict(problem.metadata),
+        "evaluation_timings_seconds": dict(star["timer"].timings),
         "run_status": "success" if k is not None else "kernel_solve_failed",
         "failure_mode": "" if k is not None else star["inverse"].get(
             "failure_mode", "kernel_unavailable"
@@ -469,6 +556,13 @@ def evaluate_curvature(
     """Evaluate only the metric-kernel curvature component."""
 
     _validate(rhos, tolerance, options)
+    started = time.perf_counter()
+    timer = PhaseTimer()
+    if options.reset_peak_memory:
+        reset_cuda_peak_memory(
+            problem.theta_star.device,
+            options.linear_algebra_device,
+        )
     try:
         star = _build_star(
             problem,
@@ -476,12 +570,31 @@ def evaluate_curvature(
             max_memory_bytes=max_memory_bytes,
             options=options,
             hessian_count=1,
+            timer=timer,
         )
     except torch.linalg.LinAlgError as error:
-        return _failure(problem, "curvature_only", error)
-    return _base_record(
+        failure = _failure(problem, "curvature_only", error)
+        failure["evaluation_timings_seconds"] = {
+            **timer.timings,
+            "total": time.perf_counter() - started,
+        }
+        failure["peak_memory"] = peak_memory_record(
+            problem.theta_star.device,
+            options.linear_algebra_device,
+        )
+        return failure
+    record = _base_record(
         problem, star, rhos=rhos, tolerance=tolerance, options=options
     )
+    record["evaluation_timings_seconds"] = {
+        **timer.timings,
+        "total": time.perf_counter() - started,
+    }
+    record["peak_memory"] = peak_memory_record(
+        problem.theta_star.device,
+        options.linear_algebra_device,
+    )
+    return record
 
 
 def evaluate_iic(
@@ -499,6 +612,13 @@ def evaluate_iic(
     """Evaluate direct IIC, hard-limit hIIC, and finite-penalty sIIC separately."""
 
     _validate(rhos, tolerance, options)
+    started = time.perf_counter()
+    timer = PhaseTimer()
+    if options.reset_peak_memory:
+        reset_cuda_peak_memory(
+            problem.theta_star.device,
+            options.linear_algebra_device,
+        )
     try:
         star = _build_star(
             problem,
@@ -506,12 +626,22 @@ def evaluate_iic(
             max_memory_bytes=max_memory_bytes,
             options=options,
             hessian_count=2,
+            timer=timer,
         )
     except torch.linalg.LinAlgError as error:
-        return {
+        failure = {
             **_failure(problem, "full_iic", error),
             **reference.to_record(),
         }
+        failure["evaluation_timings_seconds"] = {
+            **timer.timings,
+            "total": time.perf_counter() - started,
+        }
+        failure["peak_memory"] = peak_memory_record(
+            problem.theta_star.device,
+            options.linear_algebra_device,
+        )
+        return failure
     record = _base_record(
         problem, star, rhos=rhos, tolerance=tolerance, options=options
     )
@@ -521,33 +651,49 @@ def evaluate_iic(
     theta0_native = reference.theta0.detach().clone().to(
         device=star["theta"].device, dtype=star["theta"].dtype
     ).requires_grad_(True)
-    theta0_la = theta0_native.to(
-        device=star["la_device"], dtype=star["la_dtype"]
-    )
-
     def h0_matvec(vector: torch.Tensor) -> torch.Tensor:
         native = vector.to(
             device=theta0_native.device, dtype=theta0_native.dtype
         )
         product = _hvp(problem.regularizer_fn, theta0_native, native)
-        product = product.to(device=star["la_device"], dtype=star["la_dtype"])
+        product = product.to(
+            device=star["la_device"],
+            dtype=star["la_dtype"],
+        ).detach()
         return product + options.numerical_jitter * vector
 
     h0: Optional[torch.Tensor] = None
+    h0_factorization = {
+        "backend": "not_explicitly_evaluated",
+        "cholesky_succeeded": False,
+        "spectral_fallback_used": False,
+    }
     if options.hessian_backend == "dense":
-        h0 = _dense_hessian(
-            problem.regularizer_fn,
-            theta0_native,
-            chunk_size=options.hessian_chunk_size,
-        )
-        h0 = h0.to(device=star["la_device"], dtype=star["la_dtype"])
-        h0 = 0.5 * (h0 + h0.T)
-        if options.numerical_jitter:
-            h0 = h0 + options.numerical_jitter * torch.eye(
-                h0.shape[0], device=h0.device, dtype=h0.dtype
+        with timer.phase(
+            "h0_construction",
+            theta0_native.device,
+            star["la_device"],
+        ):
+            h0 = _dense_hessian(
+                problem.regularizer_fn,
+                theta0_native,
+                chunk_size=options.hessian_chunk_size,
             )
+            h0 = h0.to(
+                device=star["la_device"],
+                dtype=star["la_dtype"],
+            ).detach()
+            h0 = 0.5 * (h0 + h0.T)
+            if options.numerical_jitter:
+                h0 = h0 + options.numerical_jitter * torch.eye(
+                    h0.shape[0], device=h0.device, dtype=h0.dtype
+                )
         h0_matvec = lambda vector: h0 @ vector
-        h0_summary = _spectral_summary(h0, tolerance)
+        with timer.phase("h0_factorization", star["la_device"]):
+            h0_summary, _, h0_factorization = _factorize_dense(
+                h0,
+                tolerance,
+            )
     else:
         h0_summary = {
             "status": "not_explicitly_evaluated",
@@ -557,63 +703,69 @@ def evaluate_iic(
             "pseudo_logabsdet": None,
         }
 
-    if options.volume.backend == "exact":
-        hstar_summary = star["hstar_summary"]
-        exact_valid = bool(
-            hstar_summary["positive_definite_verified"]
-            and h0_summary["positive_definite_verified"]
-        )
-        exact_signed = bool(
-            hstar_summary["logabsdet"] is not None
-            and h0_summary["logabsdet"] is not None
-        )
-        volume = {
-            "backend": "exact",
-            "value": (
-                hstar_summary["logdet"] - h0_summary["logdet"]
-                if exact_valid
-                else None
-            ),
-            "signed_logabs_value": (
-                hstar_summary["logabsdet"] - h0_summary["logabsdet"]
-                if exact_signed
-                else None
-            ),
-            "standard_error": 0.0,
-            "positive_definite_required": True,
-            "positive_definite_observed": exact_valid,
-            "available": True,
-            "solver_failures": 0,
-            "spectra_reused": True,
-        }
-    else:
-        volume = estimate_logdet_ratio(
-            star["hstar_matvec"],
-            h0_matvec,
-            star["theta"].numel(),
-            options=options.volume,
-            dense_hstar=star["hstar"],
-            dense_h0=h0,
-            device=star["la_device"],
-            dtype=star["la_dtype"],
-            spectral_tolerance=tolerance,
-        )
-    rstar = float(problem.regularizer_fn(star["theta"]).detach())
-    r0 = float(problem.regularizer_fn(theta0_native).detach())
-    gap = rstar - r0
-    energy = math.log(gap) if math.isfinite(gap) and gap > 0.0 else None
+    with timer.phase("hessian_volume", star["la_device"]):
+        if options.volume.backend == "exact":
+            hstar_summary = star["hstar_summary"]
+            exact_valid = bool(
+                hstar_summary["positive_definite_verified"]
+                and h0_summary["positive_definite_verified"]
+            )
+            exact_signed = bool(
+                hstar_summary["logabsdet"] is not None
+                and h0_summary["logabsdet"] is not None
+            )
+            volume = {
+                "backend": "exact",
+                "value": (
+                    hstar_summary["logdet"] - h0_summary["logdet"]
+                    if exact_valid
+                    else None
+                ),
+                "signed_logabs_value": (
+                    hstar_summary["logabsdet"] - h0_summary["logabsdet"]
+                    if exact_signed
+                    else None
+                ),
+                "standard_error": 0.0,
+                "positive_definite_required": True,
+                "positive_definite_observed": exact_valid,
+                "available": True,
+                "solver_failures": 0,
+                "factorizations_reused": True,
+                "spectra_reused": True,
+            }
+        else:
+            volume = estimate_logdet_ratio(
+                star["hstar_matvec"],
+                h0_matvec,
+                star["theta"].numel(),
+                options=options.volume,
+                dense_hstar=star["hstar"],
+                dense_h0=h0,
+                device=star["la_device"],
+                dtype=star["la_dtype"],
+                spectral_tolerance=tolerance,
+            )
+    with timer.phase("energy_gap", star["theta"].device):
+        rstar = float(problem.regularizer_fn(star["theta"]).detach())
+        r0 = float(problem.regularizer_fn(theta0_native).detach())
+        gap = rstar - r0
+        energy = math.log(gap) if math.isfinite(gap) and gap > 0.0 else None
     n = float(star["a"].shape[0])
 
-    grad = torch.func.grad(problem.regularizer_fn)(star["theta"])
-    a_native = torch.func.jacrev(problem.constraint_fn)(star["theta"])
-    multiplier = torch.linalg.lstsq(a_native.T, -grad).solution.detach()
-    stationarity_residual = float(
-        torch.linalg.vector_norm(grad + a_native.T @ multiplier)
-    )
+    with timer.phase("stationarity_diagnostic", star["theta"].device):
+        grad = torch.func.grad(problem.regularizer_fn)(star["theta"])
+        a_native = torch.func.jacrev(problem.constraint_fn)(star["theta"])
+        multiplier = torch.linalg.lstsq(a_native.T, -grad).solution.detach()
+        stationarity_residual = float(
+            torch.linalg.vector_norm(
+                grad + a_native.T @ multiplier
+            ).detach()
+        )
     stationarity_tolerance = max(
         stationarity_absolute_tolerance,
         stationarity_relative_tolerance
-        * max(1.0, float(torch.linalg.vector_norm(grad))),
+        * max(1.0, float(torch.linalg.vector_norm(grad).detach())),
     )
     stationarity_valid = stationarity_residual <= stationarity_tolerance
     interpolation_valid = (
@@ -774,6 +926,7 @@ def evaluate_iic(
             "h0_positive_definite_verified": h0_summary[
                 "positive_definite_verified"
             ],
+            "h0_factorization": h0_factorization,
             "logdet_H0": h0_summary.get("logdet"),
             "logabsdet_H0": h0_summary.get("logabsdet"),
             "pseudo_logabsdet_H0": h0_summary.get("pseudo_logabsdet"),
@@ -847,6 +1000,14 @@ def evaluate_iic(
             ),
             "run_status": "success",
         }
+    )
+    record["evaluation_timings_seconds"] = {
+        **timer.timings,
+        "total": time.perf_counter() - started,
+    }
+    record["peak_memory"] = peak_memory_record(
+        problem.theta_star.device,
+        options.linear_algebra_device,
     )
     return record
 

@@ -50,6 +50,10 @@ def test_dense_curvature_matches_diagonal_oracle():
     assert result["estimand_kind"] == "curvature_only"
     assert result["hard_iic"] is None
     assert result["soft_iic"] is None
+    assert result["hstar_factorization"]["backend"] == "cholesky"
+    assert result["inverse_diagnostics"]["backend"] == "cholesky_solve"
+    assert result["evaluation_timings_seconds"]["total"] > 0.0
+    assert result["peak_memory"]["host_peak_rss_bytes"] > 0
 
 
 def test_indefinite_hessian_is_retained_but_not_certified():
@@ -68,6 +72,8 @@ def test_indefinite_hessian_is_retained_but_not_certified():
     assert result["hard_curvature"] is not None
     assert result["hard_curvature_certified"] is False
     assert result["finite_penalty_curvature"]["10"]["curvature_certified"] is False
+    assert result["hstar_factorization"]["backend"] == "spectral_fallback"
+    assert result["inverse_diagnostics"]["backend"] == "solve"
 
 
 def test_dense_memory_guard_fails_before_jacobian_construction(monkeypatch):

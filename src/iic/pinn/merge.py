@@ -58,6 +58,13 @@ def merge_shards(
     if len(estimands) != 1:
         raise ValueError("shards disagree on estimand kind")
     estimand_kind = estimands.pop()
+    source_fingerprints = {
+        manifest.get("source", {}).get("fingerprint")
+        for manifest in manifests
+    }
+    if len(source_fingerprints) != 1:
+        raise ValueError("shards disagree on source fingerprint")
+    source_fingerprint = source_fingerprints.pop()
 
     training_by_id: dict[str, dict[str, Any]] = {}
     evaluation_by_id: dict[str, dict[str, Any]] = {}
@@ -127,6 +134,7 @@ def merge_shards(
         "run_status": run_status,
         "estimand_kind": estimand_kind,
         "config_fingerprint": config.fingerprint,
+        "source_fingerprint": source_fingerprint,
         "source_shard_count": num_shards,
         "training_count": len(training_rows),
         "training_failure_count": training_failure_count,
@@ -150,10 +158,11 @@ def merge_shards(
     _atomic_json(
         output_path / "manifest.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "merged_pinn_evaluation",
             "config_fingerprint": config.fingerprint,
             "estimand_kind": estimand_kind,
+            "source_fingerprint": source_fingerprint,
             "source_shards": [
                 {
                     "num_shards": num_shards,
