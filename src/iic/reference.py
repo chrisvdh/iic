@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -45,6 +45,8 @@ class ReferencePoint:
     status: str
     global_minimum_certified: bool
     start_summaries: tuple[dict[str, Any], ...]
+    method: str = "multistart_gradient_descent_armijo"
+    certificate: Optional[str] = None
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -59,7 +61,8 @@ class ReferencePoint:
             "reference_status": self.status,
             "reference_global_minimum_certified": self.global_minimum_certified,
             "reference_start_summaries": list(self.start_summaries),
-            "reference_solver": "multistart_gradient_descent_armijo",
+            "reference_solver": self.method,
+            "reference_certificate": self.certificate,
         }
 
 

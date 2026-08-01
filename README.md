@@ -202,11 +202,14 @@ distribution. The current failure-grid configuration uses zero weight decay,
 so its default full regularizer is
 $R=R_{\mathrm{init}}+R_{\mathrm{boundary}}+R_{\mathrm{PDE}}$.
 
-The same assembled $R$ is used without modification to solve numerically for
-$\theta_0$, form the energy gap, and construct $H_\star$ and $H_0$.
-The current nonlinear reference solver performs deterministic multistart
-gradient descent with Armijo backtracking. It records a stationary candidate
-without global-minimum certification.
+The same assembled $R$ is used without modification to obtain $\theta_0$, form
+the energy gap, and construct $H_\star$ and $H_0$. For the displayed PINN
+regularizer, every enabled component is globally nonnegative and vanishes at
+the all-zero parameter vector. The package therefore uses
+$\theta_0=0$ as an analytically certified global minimum after verifying its
+component values and gradient numerically. Regularizers without this structural
+certificate fall back to deterministic multistart gradient descent with Armijo
+backtracking and are recorded only as numerical candidates.
 
 ## Numerical backends
 

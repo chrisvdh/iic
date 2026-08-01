@@ -433,6 +433,10 @@ def test_unmocked_micro_pipeline_exercises_real_numerics(tmp_path):
         "cholesky",
         "spectral_fallback",
     }
+    assert rows[0]["reference_global_minimum_certified"] is True
+    assert rows[0]["reference_solver"] == "analytic_certified_zero"
+    assert rows[0]["reference_iterations"] == 0
+    assert rows[0]["reference_function_evaluations"] == 1
     assert rows[0]["evaluation_timings_seconds"]["total"] > 0.0
     assert rows[0]["pipeline_evaluation_timings_seconds"]["total"] > 0.0
     assert (output / "checkpoints").is_dir()

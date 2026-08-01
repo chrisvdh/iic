@@ -175,6 +175,23 @@ def build_functions(
     def regularizer_fn(candidate: torch.Tensor) -> torch.Tensor:
         return sum(component_values_fn(candidate).values(), candidate.new_zeros(()))
 
+    regularizer_components = [
+        name
+        for name, enabled in (
+            ("initialization", config.regularizer.include_initialization),
+            ("pde", config.regularizer.include_pde),
+            (
+                "boundary",
+                config.regularizer.boundary_role == "explicit_regularizer",
+            ),
+            ("weight_decay", config.training.weight_decay > 0),
+            ("bea", config.regularizer.include_bea),
+        )
+        if enabled
+    ]
+    zero_reference_global_minimum_certified = set(
+        regularizer_components
+    ).issubset({"initialization", "pde", "boundary", "weight_decay"})
     metadata = {
         "constraint_name": (
             "pinn_initial_data"
@@ -201,20 +218,7 @@ def build_functions(
             if float(nu) == 0.0
             else "periodic_derivative_matching"
         ),
-        "regularizer_components": [
-            name
-            for name, enabled in (
-                ("initialization", config.regularizer.include_initialization),
-                ("pde", config.regularizer.include_pde),
-                (
-                    "boundary",
-                    config.regularizer.boundary_role == "explicit_regularizer",
-                ),
-                ("weight_decay", config.training.weight_decay > 0),
-                ("bea", config.regularizer.include_bea),
-            )
-            if enabled
-        ],
+        "regularizer_components": regularizer_components,
         "bea_coefficient": (
             float(config.training.exact_bea_learning_rate) / 4.0
             if config.regularizer.include_bea
@@ -226,6 +230,15 @@ def build_functions(
             else None
         ),
         "initialization_distribution": "he_normal_weights_unit_normal_biases",
+        "zero_reference_global_minimum_certified": (
+            zero_reference_global_minimum_certified
+        ),
+        "zero_reference_certificate": (
+            "all enabled PINN regularizer components are globally "
+            "nonnegative and vanish at the all-zero parameter vector"
+            if zero_reference_global_minimum_certified
+            else None
+        ),
         "data_fingerprint": data.fingerprint,
     }
     return PinnFunctions(

@@ -17,7 +17,7 @@ import torch
 from iic.curvature import EvaluationOptions, evaluate_curvature, evaluate_iic
 from iic.parameters import flatten_parameters, parameter_spec, unflatten_parameters
 from iic.provenance import runtime_identity, source_identity
-from iic.reference import ReferenceSolveOptions, solve_reference
+from iic.reference import ReferencePoint, ReferenceSolveOptions, solve_reference
 from iic.telemetry import PhaseTimer, peak_memory_record, reset_cuda_peak_memory
 from iic.volume import VolumeOptions
 from .config import PinnRunConfig
@@ -57,6 +57,62 @@ def _evaluation_options(config: PinnRunConfig) -> EvaluationOptions:
             cg_max_iterations=value.cg_max_iterations,
             seed=value.reference.seed,
         ),
+    )
+
+
+def _certified_zero_reference(
+    functions: Any,
+    theta_star: torch.Tensor,
+) -> ReferencePoint:
+    certificate = functions.metadata.get("zero_reference_certificate")
+    if not functions.metadata.get("zero_reference_global_minimum_certified"):
+        raise ValueError("PINN functions do not certify a zero reference")
+    theta0 = torch.zeros_like(theta_star)
+    gradient, value_tensor = torch.func.grad_and_value(
+        functions.regularizer_fn
+    )(theta0)
+    components = functions.component_values_fn(theta0)
+    value = float(value_tensor.detach())
+    gradient_norm = float(torch.linalg.vector_norm(gradient).detach())
+    component_values = {
+        name: float(component.detach())
+        for name, component in components.items()
+    }
+    if value != 0.0 or gradient_norm != 0.0 or any(
+        component != 0.0 for component in component_values.values()
+    ):
+        raise RuntimeError(
+            "the analytic zero-reference certificate failed numerical verification"
+        )
+    summary = {
+        "initial_value": value,
+        "final_value": value,
+        "value_decrease": 0.0,
+        "gradient_norm": gradient_norm,
+        "relative_stationarity": 0.0,
+        "converged": True,
+        "status": "certified_global_minimum",
+        "iterations": 0,
+        "accepted_steps": 0,
+        "function_evaluations": 1,
+        "component_values": component_values,
+        "certificate": certificate,
+    }
+    return ReferencePoint(
+        theta0=theta0,
+        value=value,
+        gradient_norm=gradient_norm,
+        relative_stationarity=0.0,
+        converged=True,
+        selected_start=0,
+        starts_attempted=1,
+        iterations=0,
+        function_evaluations=1,
+        status="certified_global_minimum",
+        global_minimum_certified=True,
+        start_summaries=(summary,),
+        method="analytic_certified_zero",
+        certificate=str(certificate),
     )
 
 
@@ -861,32 +917,42 @@ def run_pipeline(
                     "reference_solve",
                     evaluation_device,
                 ):
-                    reference = solve_reference(
-                        functions.regularizer_fn,
-                        theta_star,
-                        ReferenceSolveOptions(
-                            starts=reference_config.starts,
-                            include_theta_star_start=(
-                                reference_config.include_theta_star_start
+                    if functions.metadata.get(
+                        "zero_reference_global_minimum_certified"
+                    ):
+                        reference = _certified_zero_reference(
+                            functions,
+                            theta_star,
+                        )
+                    else:
+                        reference = solve_reference(
+                            functions.regularizer_fn,
+                            theta_star,
+                            ReferenceSolveOptions(
+                                starts=reference_config.starts,
+                                include_theta_star_start=(
+                                    reference_config.include_theta_star_start
+                                ),
+                                random_scale=reference_config.random_scale,
+                                learning_rate=reference_config.learning_rate,
+                                max_steps=reference_config.max_steps,
+                                gradient_tolerance=(
+                                    reference_config.gradient_tolerance
+                                ),
+                                relative_gradient_tolerance=(
+                                    reference_config.relative_gradient_tolerance
+                                ),
+                                armijo_coefficient=(
+                                    reference_config.armijo_coefficient
+                                ),
+                                backtrack_factor=(
+                                    reference_config.backtrack_factor
+                                ),
+                                max_backtracks=reference_config.max_backtracks,
+                                minimum_step=reference_config.minimum_step,
+                                seed=reference_config.seed,
                             ),
-                            random_scale=reference_config.random_scale,
-                            learning_rate=reference_config.learning_rate,
-                            max_steps=reference_config.max_steps,
-                            gradient_tolerance=(
-                                reference_config.gradient_tolerance
-                            ),
-                            relative_gradient_tolerance=(
-                                reference_config.relative_gradient_tolerance
-                            ),
-                            armijo_coefficient=(
-                                reference_config.armijo_coefficient
-                            ),
-                            backtrack_factor=reference_config.backtrack_factor,
-                            max_backtracks=reference_config.max_backtracks,
-                            minimum_step=reference_config.minimum_step,
-                            seed=reference_config.seed,
-                        ),
-                    )
+                        )
                 reference_record = reference.to_record()
                 failure_stage = "reference_persistence"
                 reference_path = (
@@ -905,7 +971,11 @@ def run_pipeline(
                         {
                             **_checkpoint_manifest(
                                 run_id=run_id,
-                                role="theta0_reference_candidate",
+                                role=(
+                                    "theta0_global_minimum"
+                                    if reference.global_minimum_certified
+                                    else "theta0_reference_candidate"
+                                ),
                                 model=model,
                                 config=config,
                                 data_fingerprint=training_row[
