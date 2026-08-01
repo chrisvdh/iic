@@ -47,6 +47,18 @@ def _parser() -> argparse.ArgumentParser:
         help="Skip theta0/H0 and compute only the curvature ablation.",
     )
     run.add_argument("--hessian-chunk-size", type=int)
+    compare_boundary = actions.add_parser(
+        "compare-boundary-roles",
+        help="Train once and compare both boundary decompositions.",
+    )
+    compare_boundary.add_argument("--config", type=Path, required=True)
+    compare_boundary.add_argument("--output", type=Path, required=True)
+    compare_boundary.add_argument("--dry-run", action="store_true")
+    compare_boundary.add_argument("--resume", action="store_true")
+    compare_boundary.add_argument("--allow-source-mismatch", action="store_true")
+    compare_boundary.add_argument("--num-shards", type=int, default=1)
+    compare_boundary.add_argument("--shard-index", type=int, default=0)
+    compare_boundary.add_argument("--hessian-chunk-size", type=int)
     launch = actions.add_parser(
         "launch",
         help="Launch independent local shards with calibrated worker mapping.",
@@ -253,6 +265,44 @@ def main() -> None:
                     f"analysis output already exists: {args.output}"
                 )
             _atomic_json(args.output, result)
+        elif args.action == "compare-boundary-roles":
+            from .pinn.boundary_comparison import run_boundary_role_comparison
+
+            config = load_pinn_config(args.config)
+            if args.hessian_chunk_size is not None:
+                config = replace(
+                    config,
+                    evaluation=replace(
+                        config.evaluation,
+                        hessian_chunk_size=args.hessian_chunk_size,
+                    ),
+                )
+            if args.dry_run:
+                result = {
+                    **validate_plan(
+                        config,
+                        curvature_only=True,
+                        num_shards=args.num_shards,
+                        shard_index=args.shard_index,
+                        stage="both",
+                    ),
+                    "workflow": "paired_boundary_role_curvature",
+                    "boundary_roles": [
+                        "explicit_regularizer",
+                        "constraint",
+                    ],
+                    "training_count_per_checkpoint": 1,
+                    "evaluation_count_per_checkpoint": 2,
+                }
+            else:
+                result = run_boundary_role_comparison(
+                    config,
+                    args.output,
+                    resume=args.resume,
+                    num_shards=args.num_shards,
+                    shard_index=args.shard_index,
+                    allow_source_mismatch=args.allow_source_mismatch,
+                )
         else:
             config = load_pinn_config(args.config)
             if args.hessian_chunk_size is not None:

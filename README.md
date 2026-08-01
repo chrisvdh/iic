@@ -339,6 +339,24 @@ The larger `configs/pinn-pilot.example.json` uses L-BFGS training in float32
 and evaluates curvature in float64. Its fixed collocation seed is independent
 of the model initialization seeds.
 
+To diagnose the effect of treating periodic boundary residuals as constraints,
+train one network and evaluate that identical checkpoint under both
+decompositions:
+
+```bash
+iic pinn compare-boundary-roles \
+  --config configs/pinn-failure-grid.example.json \
+  --output runs/boundary-role-pair \
+  --num-shards 845 \
+  --shard-index 420 \
+  --hessian-chunk-size 16
+```
+
+This command is deliberately curvature-only. It writes one training checkpoint
+and two evaluation records to `boundary_role_comparison.json`, with the shared
+parameter fingerprint and training diagnostics recorded in both rows. Only the
+constraint map and corresponding full regularizer change between rows.
+
 `configs/pinn-failure-grid.example.json` expands a decimal 13-by-13
 reaction-diffusion grid with five model seeds (845 runs), the four-by-50
 network, 1,000 fixed collocation points, L-BFGS training, and

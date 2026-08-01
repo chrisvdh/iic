@@ -72,6 +72,66 @@ def test_cli_curvature_only_dry_run_is_explicit(tmp_path):
     assert not output.exists()
 
 
+def test_cli_boundary_comparison_dry_run_trains_once_and_evaluates_twice(
+    tmp_path,
+):
+    output = tmp_path / "paired"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "iic.cli",
+            "pinn",
+            "compare-boundary-roles",
+            "--config",
+            str(ROOT / "configs" / "pinn-smoke.json"),
+            "--output",
+            str(output),
+            "--dry-run",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_source_environment(),
+    )
+    result = json.loads(completed.stdout)
+    assert result["workflow"] == "paired_boundary_role_curvature"
+    assert result["boundary_roles"] == [
+        "explicit_regularizer",
+        "constraint",
+    ]
+    assert result["training_count_per_checkpoint"] == 1
+    assert result["evaluation_count_per_checkpoint"] == 2
+    assert not output.exists()
+
+
+def test_cli_run_dry_run_accepts_hessian_chunk_override(tmp_path):
+    output = tmp_path / "chunked"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "iic.cli",
+            "pinn",
+            "run",
+            "--config",
+            str(ROOT / "configs" / "pinn-smoke.json"),
+            "--output",
+            str(output),
+            "--hessian-chunk-size",
+            "2",
+            "--dry-run",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_source_environment(),
+    )
+    result = json.loads(completed.stdout)
+    assert result["hessian_chunk_size"] == 2
+    assert not output.exists()
+
+
 def test_cli_inventory_performs_no_computation_or_output_write(tmp_path):
     output = tmp_path / "unused"
     completed = subprocess.run(
