@@ -46,7 +46,9 @@
     "include_initialization": true,
     "include_pde": true,
     "include_bea": false,
-    "pde_weight": 1.0
+    "pde_weight": 1.0,
+    "boundary_role": "explicit_regularizer",
+    "boundary_weight": 1.0
   },
   "evaluation": {
     "mode": "full_iic",

@@ -11,10 +11,16 @@ Before changing code:
 
 ## Mathematical invariants
 
-- The PINN constraint map contains scaled data and periodic-boundary residuals.
-- `0.5 * ||h(theta)||^2` equals the configured data and boundary MSE.
+- By default, the PINN constraint map contains only scaled initial-data
+  residuals. Periodic value and derivative matching are an explicit structural
+  regularizer. A recorded compatibility option may instead include them in the
+  constraint map.
+- The boundary role changes the IIC decomposition, not the training objective.
+  For equal weights, both roles optimize the same data, boundary, PDE, and
+  weight-decay terms.
 - The PDE residual is an explicit data-dependent regularizer, not a constraint.
-- `nu = 0` and `nu > 0` are distinct estimands because derivative matching differs.
+- `nu = 0` and `nu > 0` are distinct estimands because derivative matching
+  differs, whether the boundary terms are constraints or regularizers.
 - Every successfully trained PINN checkpoint is evaluated. Interpolation,
   stationarity, definiteness, and reference validity are reported as statuses
   and must not be used to silently delete rows.
@@ -24,8 +30,10 @@ Before changing code:
   theory-validity conditions.
 - Model-initialization and collocation-data seeds are independent provenance
   fields. Replicate comparisons must not vary both accidentally.
-- The regularizer is the sum of all enabled initialization, PDE, and explicit
-  components; the same sum defines `theta0`, the energy gap, `Hstar`, and `H0`.
+- The regularizer is the sum of all enabled initialization, boundary, PDE,
+  weight-decay, and implicit components; the same sum defines `theta0`, the
+  energy gap, `Hstar`, and `H0`. Boundary terms are included in this sum only
+  when their recorded role is `explicit_regularizer`.
 - The full hard score is
   `log(Rstar - R0) + (logdet(KH) + logdet(Hstar) - logdet(H0)) / N - log(N)`.
 - `N` is the scalar output dimension of the constraint map.

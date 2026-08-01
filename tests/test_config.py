@@ -17,6 +17,8 @@ def test_smoke_config_is_public_reference_plan():
 
     assert config.run_count == 1
     assert config.regularizer.include_bea is False
+    assert config.regularizer.boundary_role == "explicit_regularizer"
+    assert config.regularizer.boundary_weight == pytest.approx(1.0)
     assert config.training.optimizer == "gd"
     assert config.training.device == "cpu"
     assert config.training.dtype == "float64"
@@ -30,6 +32,39 @@ def test_smoke_config_is_public_reference_plan():
     assert plan["reference_solve_enabled"] is True
     assert plan["full_iic_available"] is True
     assert plan["spectral_absolute_floor"] == pytest.approx(1e-14)
+    assert plan["boundary_role"] == "explicit_regularizer"
+    assert plan["boundary_weight"] == pytest.approx(1.0)
+
+
+def test_boundary_defaults_are_normalized_and_validated(tmp_path):
+    raw = json.loads((ROOT / "configs" / "pinn-smoke.json").read_text())
+    del raw["regularizer"]["boundary_role"]
+    del raw["regularizer"]["boundary_weight"]
+    path = tmp_path / "boundary-default.json"
+    path.write_text(json.dumps(raw))
+
+    config = load_config(path)
+
+    assert config.regularizer.boundary_role == "explicit_regularizer"
+    assert config.regularizer.boundary_weight == pytest.approx(1.0)
+    assert config.raw["regularizer"]["boundary_role"] == "explicit_regularizer"
+    assert config.raw["regularizer"]["boundary_weight"] == pytest.approx(1.0)
+
+    raw["regularizer"]["boundary_role"] = "unknown"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="boundary_role"):
+        load_config(path)
+
+    raw["regularizer"]["boundary_role"] = "constraint"
+    raw["regularizer"]["boundary_weight"] = 1.0
+    path.write_text(json.dumps(raw))
+    constraint_config = load_config(path)
+    assert constraint_config.regularizer.boundary_role == "constraint"
+
+    raw["regularizer"]["boundary_weight"] = 0.0
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="boundary_weight"):
+        load_config(path)
 
 
 def test_legacy_spectral_tolerance_key_remains_an_alias(tmp_path):

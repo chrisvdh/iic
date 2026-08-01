@@ -26,7 +26,10 @@ class PinnFunctions:
     """Closures and metadata shared by training and curvature evaluation."""
 
     theta: torch.Tensor
+    data_constraint_fn: Any
+    boundary_residual_fn: Any
     constraint_fn: Any
+    boundary_regularizer_fn: Any
     pde_regularizer_fn: Any
     training_objective_fn: Any
     regularizer_fn: Any
@@ -72,19 +75,20 @@ def build_functions(
         u_xx = hessians[:, 0, 0]
         return u_t - float(nu) * u_xx - float(rho) * u + float(rho) * u.square()
 
-    def constraint_fn(candidate: torch.Tensor) -> torch.Tensor:
-        blocks: list[torch.Tensor] = []
+    def data_constraint_fn(candidate: torch.Tensor) -> torch.Tensor:
         n_data = data.initial_coords.shape[0]
         data_scale = torch.sqrt(
             torch.as_tensor(2.0 / n_data, device=candidate.device, dtype=candidate.dtype)
         )
         prediction = values(candidate, data.initial_coords)
-        blocks.append(data_scale * (data.initial_values.reshape(-1) - prediction))
+        return data_scale * (data.initial_values.reshape(-1) - prediction)
 
+    def boundary_residual_fn(candidate: torch.Tensor) -> torch.Tensor:
+        blocks: list[torch.Tensor] = []
         n_boundary = data.boundary_lower.shape[0]
         boundary_scale = torch.sqrt(
             torch.as_tensor(
-                2.0 / n_boundary,
+                2.0 * config.regularizer.boundary_weight / n_boundary,
                 device=candidate.device,
                 dtype=candidate.dtype,
             )
@@ -104,6 +108,16 @@ def build_functions(
             blocks.append(boundary_scale * (lower_grad[:, 0] - upper_grad[:, 0]))
         return torch.cat(blocks)
 
+    def constraint_fn(candidate: torch.Tensor) -> torch.Tensor:
+        data_residuals = data_constraint_fn(candidate)
+        if config.regularizer.boundary_role == "constraint":
+            return torch.cat((data_residuals, boundary_residual_fn(candidate)))
+        return data_residuals
+
+    def boundary_regularizer_fn(candidate: torch.Tensor) -> torch.Tensor:
+        residuals = boundary_residual_fn(candidate)
+        return 0.5 * residuals.square().sum()
+
     def pde_regularizer_fn(candidate: torch.Tensor) -> torch.Tensor:
         return float(config.regularizer.pde_weight) * pde_residuals(candidate).square().mean()
 
@@ -113,6 +127,8 @@ def build_functions(
     def training_objective_fn(candidate: torch.Tensor) -> torch.Tensor:
         constraints = constraint_fn(candidate)
         objective = 0.5 * constraints.square().sum()
+        if config.regularizer.boundary_role == "explicit_regularizer":
+            objective = objective + boundary_regularizer_fn(candidate)
         if config.regularizer.include_pde:
             objective = objective + pde_regularizer_fn(candidate)
         if config.training.weight_decay:
@@ -143,6 +159,11 @@ def build_functions(
                 if config.regularizer.include_pde
                 else zero
             ),
+            "boundary": (
+                boundary_regularizer_fn(candidate)
+                if config.regularizer.boundary_role == "explicit_regularizer"
+                else zero
+            ),
             "weight_decay": (
                 weight_decay(candidate)
                 if config.training.weight_decay
@@ -155,9 +176,24 @@ def build_functions(
         return sum(component_values_fn(candidate).values(), candidate.new_zeros(()))
 
     metadata = {
-        "constraint_name": "pinn_data_periodic_boundary",
+        "constraint_name": (
+            "pinn_initial_data"
+            if config.regularizer.boundary_role == "explicit_regularizer"
+            else "pinn_initial_data_periodic_boundary"
+        ),
         "constraint_declaration": (
-            "0.5 * ||h(theta)||^2 = L_data(theta) + L_boundary(theta)"
+            "0.5 * ||h(theta)||^2 = L_initial_data(theta)"
+            if config.regularizer.boundary_role == "explicit_regularizer"
+            else (
+                "0.5 * ||h(theta)||^2 = L_initial_data(theta) "
+                "+ B_boundary(theta)"
+            )
+        ),
+        "boundary_role": config.regularizer.boundary_role,
+        "boundary_weight": config.regularizer.boundary_weight,
+        "boundary_declaration": (
+            "B_boundary(theta) = boundary_weight * "
+            "(periodic_value_MSE + included_periodic_derivative_MSE)"
         ),
         "pde_role": "explicit_data_dependent_regularizer",
         "nu_zero_policy": (
@@ -170,6 +206,10 @@ def build_functions(
             for name, enabled in (
                 ("initialization", config.regularizer.include_initialization),
                 ("pde", config.regularizer.include_pde),
+                (
+                    "boundary",
+                    config.regularizer.boundary_role == "explicit_regularizer",
+                ),
                 ("weight_decay", config.training.weight_decay > 0),
                 ("bea", config.regularizer.include_bea),
             )
@@ -190,7 +230,10 @@ def build_functions(
     }
     return PinnFunctions(
         theta=theta,
+        data_constraint_fn=data_constraint_fn,
+        boundary_residual_fn=boundary_residual_fn,
         constraint_fn=constraint_fn,
+        boundary_regularizer_fn=boundary_regularizer_fn,
         pde_regularizer_fn=pde_regularizer_fn,
         training_objective_fn=training_objective_fn,
         regularizer_fn=regularizer_fn,

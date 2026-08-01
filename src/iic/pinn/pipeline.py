@@ -159,6 +159,18 @@ def _run_specs(
     ]
 
 
+def _estimand_metadata(config: PinnRunConfig, nu: float) -> dict[str, str]:
+    group = "nu_zero" if nu == 0.0 else "nu_positive"
+    if config.regularizer.boundary_role == "explicit_regularizer":
+        constraint_estimand = "initial_data"
+    else:
+        constraint_estimand = f"initial_data_periodic_boundary_{group}"
+    return {
+        "estimand_group": group,
+        "constraint_estimand": constraint_estimand,
+    }
+
+
 def _checkpoint_manifest(
     *,
     run_id: str,
@@ -172,7 +184,7 @@ def _checkpoint_manifest(
     source: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": run_id,
         "role": role,
         "parameter_fingerprint": parameter_fingerprint,
@@ -196,6 +208,8 @@ def _checkpoint_manifest(
             "bea": config.regularizer.include_bea,
             "weight_decay": config.training.weight_decay,
             "pde_weight": config.regularizer.pde_weight,
+            "boundary_role": config.regularizer.boundary_role,
+            "boundary_weight": config.regularizer.boundary_weight,
         },
         "training": {
             "device": config.training.device,
@@ -290,7 +304,7 @@ def run_manifest(
     mode = evaluation_mode or config.evaluation.mode
     source_record = source or source_identity()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "package": "interpolating-iic",
         "estimand_kind": mode,
         "configured_estimand_kind": config.evaluation.mode,
@@ -376,6 +390,8 @@ def validate_plan(
         "hessian_chunk_size": config.evaluation.hessian_chunk_size,
         "inverse_backend": config.evaluation.inverse_backend,
         "volume_backend": config.evaluation.volume_backend,
+        "boundary_role": config.regularizer.boundary_role,
+        "boundary_weight": config.regularizer.boundary_weight,
         "spectral_absolute_floor": (
             config.evaluation.spectral_absolute_floor
         ),
@@ -598,15 +614,20 @@ def run_pipeline(
                     "run_id": run_id,
                     "nu": point.nu,
                     "rho": point.rho,
-                    "constraint_estimand": (
-                        "nu_zero" if point.nu == 0.0 else "nu_positive"
-                    ),
+                    **_estimand_metadata(config, point.nu),
+                    "boundary_role": config.regularizer.boundary_role,
+                    "boundary_weight": config.regularizer.boundary_weight,
                     "model_seed": seed,
                     "collocation_seed": config.data.collocation_seed,
                     "success": True,
                     "run_status": "success",
+                    "loss_constraint": result.loss_constraint,
+                    "loss_data": result.loss_data,
+                    "loss_boundary": result.loss_boundary,
                     "loss_data_boundary": result.loss_data_boundary,
                     "loss_pde": result.loss_pde,
+                    "data_residual": result.data_residual,
+                    "boundary_residual": result.boundary_residual,
                     "interp_residual": result.interp_residual,
                     "relative_error": result.relative_error,
                     "terminal_gradient_norm": result.terminal_gradient_norm,
@@ -644,9 +665,9 @@ def run_pipeline(
                     "run_id": run_id,
                     "nu": point.nu,
                     "rho": point.rho,
-                    "constraint_estimand": (
-                        "nu_zero" if point.nu == 0.0 else "nu_positive"
-                    ),
+                    **_estimand_metadata(config, point.nu),
+                    "boundary_role": config.regularizer.boundary_role,
+                    "boundary_weight": config.regularizer.boundary_weight,
                     "model_seed": seed,
                     "collocation_seed": config.data.collocation_seed,
                     "success": False,

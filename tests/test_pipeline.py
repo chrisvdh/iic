@@ -23,13 +23,17 @@ def _fake_functions(model):
         return {
             "initialization": 0.5 * square_sum,
             "pde": 0.25 * square_sum,
+            "boundary": candidate.new_zeros(()),
             "weight_decay": candidate.new_zeros(()),
             "bea": 0.25 * square_sum,
         }
 
     return PinnFunctions(
         theta=theta,
+        data_constraint_fn=lambda candidate: candidate[:1],
+        boundary_residual_fn=lambda candidate: candidate[:1].new_zeros((1,)),
         constraint_fn=lambda candidate: candidate[:1],
+        boundary_regularizer_fn=lambda candidate: candidate.new_zeros(()),
         pde_regularizer_fn=lambda candidate: 0.25
         * candidate.square().sum(),
         training_objective_fn=lambda candidate: candidate.square().sum(),
@@ -43,8 +47,13 @@ def _fake_train(model, _data, _config, **_kwargs):
     theta = flatten_parameters(model).detach()
     return TrainingResult(
         theta_star=theta,
+        loss_constraint=0.1,
+        loss_data=0.1,
+        loss_boundary=0.0,
         loss_data_boundary=0.1,
         loss_pde=0.2,
+        data_residual=0.3,
+        boundary_residual=0.0,
         interp_residual=0.3,
         relative_error=0.4,
         terminal_gradient_norm=0.5,
@@ -123,6 +132,10 @@ def test_mocked_pipeline_writes_full_iic_and_reference_artifacts(
     assert len(list((output / "references").glob("*_theta0.npz"))) == 1
     rows = json.loads((output / "evaluation.json").read_text())
     assert rows[0]["regularizer_component_gaps"]["bea"] > 0.0
+    assert rows[0]["boundary_role"] == "explicit_regularizer"
+    assert rows[0]["constraint_estimand"] == "initial_data"
+    assert rows[0]["estimand_group"] == "nu_positive"
+    assert rows[0]["loss_constraint"] == pytest.approx(0.1)
     assert rows[0]["regularizer_component_gap_residual"] == pytest.approx(0.0)
     assert rows[0]["hard_iic"] == pytest.approx(1.25)
     manifest = json.loads((output / "manifest.json").read_text())
@@ -411,7 +424,11 @@ def test_unmocked_micro_pipeline_exercises_real_numerics(tmp_path):
     assert summary["evaluation_count"] == 1
     rows = json.loads((output / "evaluation.json").read_text())
     assert rows[0]["estimand_kind"] == "full_iic"
-    assert rows[0]["constraint_count"] == 7
+    assert rows[0]["constraint_count"] == 4
+    assert rows[0]["boundary_role"] == "explicit_regularizer"
+    assert rows[0]["constraint_estimand"] == "initial_data"
+    assert rows[0]["estimand_group"] == "nu_zero"
+    assert rows[0]["regularizer_components_star"]["boundary"] >= 0.0
     assert rows[0]["hstar_factorization"]["backend"] in {
         "cholesky",
         "spectral_fallback",

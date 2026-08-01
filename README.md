@@ -7,7 +7,7 @@
 `iic` is an experimental Python package for computing the hard-limit
 interpolation information criterion (IIC), its finite-penalty soft extension,
 and the component quantities needed to diagnose a fitted model. Its first
-end-to-end experiment studies a family of reaction--diffusion physics-informed
+end-to-end experiment studies a family of reaction-diffusion physics-informed
 neural networks (PINNs).
 
 The hard-limit IIC is the primary object. Soft-IIC and curvature-only outputs
@@ -98,7 +98,7 @@ legacy terminology and does not denote the PDE reaction coefficient.
 
 ## Reaction--diffusion PINNs
 
-The included end-to-end experiment solves the logistic reaction--diffusion
+The included end-to-end experiment solves the logistic reaction-diffusion
 equation
 
 $$
@@ -126,40 +126,32 @@ u(x,0)
 u(0,t)=u(2\pi,t).
 $$
 
-For $\nu>0$, the constraint map additionally enforces
-$u_x(0,t)=u_x(2\pi,t)$. This derivative-matching block is omitted when
-$\nu=0$, so the $\nu=0$ and $\nu>0$ cases have different constraint
-dimensions and are reported as distinct estimands.
+For $\nu>0$, periodicity also requires $u_x(0,t)=u_x(2\pi,t)$. This
+derivative-matching term is omitted when $\nu=0$, so the two cases remain
+distinct estimands whether the boundary terms are treated as constraints or
+regularizers.
 
 ### Constraint map
 
-For $n_x$ initial-condition samples and $n_t$ boundary times, the PINN
-constraint map concatenates
+For $n_x$ initial-condition samples, the default constraint map contains only
+the observed initial data:
 
-$$
-\begin{aligned}
-h_{\mathrm{initial},i}(\theta)
-&=\sqrt{\frac{2}{n_x}}\left(u(x_i,0)-u_\theta(x_i,0)\right),\\
-h_{\mathrm{periodic},j}(\theta)
-&=\sqrt{\frac{2}{n_t}}\left(u_\theta(0,t_j)-u_\theta(2\pi,t_j)\right),\\
-h_{\mathrm{derivative},j}(\theta)
-&=\sqrt{\frac{2}{n_t}}\left(u_{\theta,x}(0,t_j)
--u_{\theta,x}(2\pi,t_j)\right),\qquad \nu>0.
-\end{aligned}
-$$
+$$h_i(\theta)=\sqrt{\frac{2}{n_x}}\left(u(x_i,0)-u_\theta(x_i,0)\right).$$
 
-The scaling is chosen so that
+Thus $\frac{1}{2}\lVert h(\theta)\rVert^2$ is the initial-data MSE and
+$N=n_x$. In the example grids, $N=256$ for both $\nu=0$ and $\nu>0$.
+Periodic boundary values are structural information about the admissible
+function class rather than additional Bayesian observations, so their default
+role is an explicit regularizer.
 
-$$
-\frac{1}{2}\lVert h(\theta)\rVert^2
-=L_{\mathrm{initial}}(\theta)+L_{\mathrm{boundary}}(\theta),
-$$
-
-where each included block contributes its mean squared residual. The PDE
-residual is deliberately not part of $h$: it is an explicit,
-data-dependent regularizer. With the example grid sizes $n_x=256$ and
-$n_t=100$, this gives $N=356$ for $\nu=0$ and $N=456$ for
-$\nu>0$.
+Set `regularizer.boundary_role` to `constraint` to recover the alternative
+decomposition. In that mode the scaled periodic value residuals are appended
+to $h$, along with periodic derivative residuals when $\nu>0$. The resulting
+dimensions are $N=n_x+n_t$ for $\nu=0$ and $N=n_x+2n_t$ for $\nu>0$.
+`regularizer.boundary_weight` is applied in either mode, and switching the role
+does not change the training objective. The selected role, weight, separate
+data and boundary losses, and separate residual norms are recorded in every
+run.
 
 ### Model and data
 
@@ -178,32 +170,25 @@ inserted into the IIC constraint map beyond the initial condition.
 
 ### Training objective and regularizer
 
-The training objective is
+With the default boundary role, the training objective is
 
-$$
-L_{\mathrm{train}}(\theta)
-=\frac{1}{2}\lVert h(\theta)\rVert^2
-+R_{\mathrm{PDE}}(\theta)
-+R_{\mathrm{wd}}(\theta),
-$$
+$$L_{\mathrm{train}}(\theta)=\frac{1}{2}\lVert h(\theta)\rVert^2+R_{\mathrm{boundary}}(\theta)+R_{\mathrm{PDE}}(\theta)+R_{\mathrm{wd}}(\theta).$$
 
 with enabled terms
 
-$$
-R_{\mathrm{PDE}}(\theta)
-=\lambda_{\mathrm{PDE}}\frac{1}{n_f}
-\sum_{k=1}^{n_f}r_\theta(x_k,t_k)^2,
-\qquad
-R_{\mathrm{wd}}(\theta)
-=\frac{\lambda_{\mathrm{wd}}}{2}\lVert\theta\rVert^2.
-$$
+$$R_{\mathrm{boundary}}(\theta)=\lambda_{\mathrm{boundary}}L_{\mathrm{boundary}}(\theta),$$
+
+where $L_{\mathrm{boundary}}$ is the sum of the periodic-value MSE and,
+for $\nu>0$, the periodic-derivative MSE. The other enabled terms are
+
+$$R_{\mathrm{PDE}}(\theta)=\lambda_{\mathrm{PDE}}\frac{1}{n_f}\sum_{k=1}^{n_f}r_\theta(x_k,t_k)^2,\qquad R_{\mathrm{wd}}(\theta)=\frac{\lambda_{\mathrm{wd}}}{2}\lVert\theta\rVert^2.$$
+
+In boundary-constraint mode, $R_{\mathrm{boundary}}$ is moved into the scaled
+constraint map instead. It is not counted in both places.
 
 The full regularizer used by IIC is assembled independently as
 
-$$
-R
-=R_{\mathrm{init}}+R_{\mathrm{PDE}}+R_{\mathrm{wd}},
-$$
+$$R=R_{\mathrm{init}}+R_{\mathrm{boundary}}+R_{\mathrm{PDE}}+R_{\mathrm{wd}},$$
 
 with only enabled components included. The initialization regularizer is the
 negative log-density, up to additive constants, of the Gaussian distribution
@@ -219,7 +204,8 @@ $$
 This initialization term contributes to the IIC regularizer but is not added
 to the optimization loss merely because the parameters were sampled from that
 distribution. The current failure-grid configuration uses zero weight decay,
-so its full regularizer is $R=R_{\mathrm{init}}+R_{\mathrm{PDE}}$.
+so its default full regularizer is
+$R=R_{\mathrm{init}}+R_{\mathrm{boundary}}+R_{\mathrm{PDE}}$.
 
 The same assembled $R$ is used without modification to solve numerically for
 $\theta_0$, form the energy gap, and construct $H_\star$ and $H_0$.
@@ -359,10 +345,10 @@ and evaluates curvature in float64. Its fixed collocation seed is independent
 of the model initialization seeds.
 
 `configs/pinn-failure-grid.example.json` expands a decimal 13-by-13
-reaction--diffusion grid with five model seeds (845 runs), the four-by-50
+reaction-diffusion grid with five model seeds (845 runs), the four-by-50
 network, 1,000 fixed collocation points, L-BFGS training, and
-`R_init + R_PDE` evaluation. Its matched He-Gaussian initialization differs
-from PyTorch's default initialization.
+`R_init + R_boundary + R_PDE` evaluation. Its matched He-Gaussian
+initialization differs from PyTorch's default initialization.
 
 ### Shards and resumption
 
@@ -421,7 +407,8 @@ iic pinn launch \
 
 An eight-GPU calibration uses shards
 `0 61 67 128 420 451 782 843`. These are actual failure-grid runs spanning
-both constraint dimensions and low, intermediate, and high PDE settings.
+both derivative-matching cases induced by $\nu=0$ and $\nu>0$, and low,
+intermediate, and high PDE settings.
 Running them in the eventual full-run output directory allows the later
 845-shard launch to reuse them.
 
@@ -502,7 +489,7 @@ The dependency-light analysis command reports descriptive all-model
 correlations separately from interpolating and noninterpolating subsets. It
 also reports correlations between PDE-cell medians and median within-cell
 Kendall tau-b. The `nu=0` and `nu>0` estimands are always reported separately
-because derivative boundary matching changes the constraint dimension:
+because periodic derivative matching is included only for positive diffusion:
 
 ```bash
 iic pinn analyze \

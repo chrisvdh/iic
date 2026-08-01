@@ -191,8 +191,11 @@ def analyze_rows(
     successful = [row for row in rows if row.get("success") is True]
 
     def estimand(row: dict[str, Any]) -> str:
+        group = row.get("estimand_group")
+        if isinstance(group, str):
+            return group
         declared = row.get("constraint_estimand")
-        if isinstance(declared, str):
+        if declared in {"nu_zero", "nu_positive"}:
             return declared
         nu = _finite(row.get("nu"))
         return "nu_zero" if nu == 0.0 else "nu_positive"
@@ -260,8 +263,9 @@ def analyze_rows(
         "schema_version": 1,
         "target": target,
         "estimand_policy": (
-            "nu=0 and nu>0 are analyzed separately because their boundary "
-            "constraint maps have different dimensions"
+            "nu=0 and nu>0 are analyzed separately because periodic derivative "
+            "matching is included only for nu>0, either in the constraint map "
+            "or in the boundary regularizer"
         ),
         "interpretation": {
             "all_evaluated": (

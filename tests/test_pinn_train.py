@@ -34,7 +34,10 @@ def test_lbfgs_phase_uses_closure_and_records_actual_work(tmp_path, monkeypatch)
         theta = flatten_parameters(candidate_model)
         return PinnFunctions(
             theta=theta,
+            data_constraint_fn=lambda candidate: candidate[:1],
+            boundary_residual_fn=lambda candidate: candidate[:1].new_zeros((1,)),
             constraint_fn=lambda candidate: candidate[:1],
+            boundary_regularizer_fn=lambda candidate: candidate.new_zeros(()),
             pde_regularizer_fn=lambda candidate: candidate.new_zeros(()),
             training_objective_fn=lambda candidate: candidate.square().sum(),
             regularizer_fn=lambda candidate: candidate.square().sum(),

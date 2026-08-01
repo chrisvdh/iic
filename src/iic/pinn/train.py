@@ -21,8 +21,13 @@ from .problem import build_functions
 @dataclass(frozen=True)
 class TrainingResult:
     theta_star: torch.Tensor
+    loss_constraint: float
+    loss_data: float
+    loss_boundary: float
     loss_data_boundary: float
     loss_pde: float
+    data_residual: float
+    boundary_residual: float
     interp_residual: float
     relative_error: float
     terminal_gradient_norm: float
@@ -133,8 +138,13 @@ def train(
 
     model.eval()
     theta_star = flatten_parameters(model)
+    data_residuals = functions.data_constraint_fn(theta_star)
+    boundary_residuals = functions.boundary_residual_fn(theta_star)
     constraints = functions.constraint_fn(theta_star)
-    loss_data_boundary = 0.5 * constraints.square().sum()
+    loss_constraint = 0.5 * constraints.square().sum()
+    loss_data = 0.5 * data_residuals.square().sum()
+    loss_boundary = 0.5 * boundary_residuals.square().sum()
+    loss_data_boundary = loss_data + loss_boundary
     loss_pde = functions.pde_regularizer_fn(theta_star)
     terminal_objective = functions.training_objective_fn(theta_star)
     terminal_gradients = torch.autograd.grad(terminal_objective, tuple(model.parameters()))
@@ -150,8 +160,17 @@ def train(
 
     return TrainingResult(
         theta_star=theta_star.detach(),
+        loss_constraint=float(loss_constraint.detach()),
+        loss_data=float(loss_data.detach()),
+        loss_boundary=float(loss_boundary.detach()),
         loss_data_boundary=float(loss_data_boundary.detach()),
         loss_pde=float(loss_pde.detach()),
+        data_residual=float(
+            torch.linalg.vector_norm(data_residuals.detach()) / math.sqrt(2.0)
+        ),
+        boundary_residual=float(
+            torch.linalg.vector_norm(boundary_residuals.detach()) / math.sqrt(2.0)
+        ),
         interp_residual=float(torch.linalg.vector_norm(constraints.detach()) / math.sqrt(2.0)),
         relative_error=float(relative_error),
         terminal_gradient_norm=float(terminal_gradient_norm),

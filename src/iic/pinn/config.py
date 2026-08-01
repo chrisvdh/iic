@@ -75,6 +75,8 @@ class RegularizerConfig:
     include_pde: bool
     include_bea: bool
     pde_weight: float
+    boundary_role: str
+    boundary_weight: float
 
 
 @dataclass(frozen=True)
@@ -309,6 +311,13 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("top-level configuration must be a JSON object")
+    regularizer_defaults = raw.get("regularizer")
+    if isinstance(regularizer_defaults, dict):
+        regularizer_defaults.setdefault(
+            "boundary_role",
+            "explicit_regularizer",
+        )
+        regularizer_defaults.setdefault("boundary_weight", 1.0)
     canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"))
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -423,12 +432,26 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
         include_pde=bool(regularizer_raw.get("include_pde", True)),
         include_bea=bool(regularizer_raw.get("include_bea", False)),
         pde_weight=float(regularizer_raw.get("pde_weight", 1.0)),
+        boundary_role=str(regularizer_raw["boundary_role"]),
+        boundary_weight=float(regularizer_raw["boundary_weight"]),
     )
     if (
         not math.isfinite(regularizer.pde_weight)
         or regularizer.pde_weight < 0
     ):
         raise ValueError("pde_weight must be finite and nonnegative")
+    if regularizer.boundary_role not in {
+        "explicit_regularizer",
+        "constraint",
+    }:
+        raise ValueError(
+            "regularizer.boundary_role must be explicit_regularizer or constraint"
+        )
+    if (
+        not math.isfinite(regularizer.boundary_weight)
+        or regularizer.boundary_weight <= 0
+    ):
+        raise ValueError("boundary_weight must be finite and positive")
     if regularizer.include_bea and training.exact_bea_learning_rate is None:
         raise ValueError(
             "exact h/4 BEA requires one full-batch zero-momentum GD phase"
@@ -438,6 +461,7 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
             regularizer.include_initialization,
             regularizer.include_pde,
             regularizer.include_bea,
+            regularizer.boundary_role == "explicit_regularizer",
             training.weight_decay > 0,
         )
     ):
