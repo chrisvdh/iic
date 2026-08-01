@@ -8,13 +8,8 @@
 interpolation information criterion (IIC), its finite-penalty soft extension,
 and the component quantities needed to diagnose a fitted model. Its first
 end-to-end experiment studies a family of reaction-diffusion physics-informed
-neural networks (PINNs).
-
-The hard-limit IIC is the primary object. Soft-IIC and curvature-only outputs
-are explicit extensions or ablations; they are not substitutes silently used
-when the hard-limit assumptions fail.
-
-The core interfaces are intended to extend to grokking trajectories and
+neural networks (PINNs). The core interfaces are intended to extend to
+grokking trajectories and
 LoRA/adapter parameter subspaces. Those are future experiment families, not
 currently documented as complete IIC workflows.
 
@@ -384,7 +379,7 @@ For a single full-size timing run on one GPU, shard 420 is the grid member
 $(\nu,\rho,\mathrm{seed})=(3,3,0)$:
 
 ```bash
-iic pinn launch \
+iic pinn calibrate \
   --config configs/pinn-failure-grid.example.json \
   --output runs/pinn-failure-grid \
   --stage training \
@@ -393,7 +388,7 @@ iic pinn launch \
   --workers 1 \
   --cuda-devices 0
 
-iic pinn launch \
+iic pinn calibrate \
   --config configs/pinn-failure-grid.example.json \
   --output runs/pinn-failure-grid \
   --stage evaluation \
@@ -405,12 +400,47 @@ iic pinn launch \
   --hessian-chunk-size 16
 ```
 
-An eight-GPU calibration uses shards
-`0 61 67 128 420 451 782 843`. These are actual failure-grid runs spanning
-both derivative-matching cases induced by $\nu=0$ and $\nu>0$, and low,
-intermediate, and high PDE settings.
+These commands execute the real configured grid point, not a synthetic timing
+kernel. They write `calibration_summary.json` and periodic host/GPU samples
+under `telemetry/`. Because the calibration uses the eventual full-run output
+and ordinary shard layout, a later `--resume` launch validates and skips shard
+420.
+
+The default four-GPU calibration uses shards `0 61 420 843`. These are actual
+failure-grid runs spanning both derivative-matching cases induced by $\nu=0$
+and $\nu>0$, and low, intermediate, and high PDE settings.
 Running them in the eventual full-run output directory allows the later
 845-shard launch to reuse them.
+
+Increase density in steps by changing both `--workers-per-gpu` and `--workers`.
+The launcher enforces fixed per-GPU slots, so completion order cannot exceed
+the requested density. The default is four GPUs at density one:
+`--cuda-devices 0 1 2 3 --workers-per-gpu 1 --workers 4`. A two-GPU host can
+override this with `--cuda-devices 0 1`, while an eight-GPU host can select
+`0 1 2 3 4 5 6 7`; shard identity is unchanged. A scheduler-provided
+`CUDA_VISIBLE_DEVICES` mask is preserved, and command-line device indices are
+logical indices within that inherited mask, including UUID and MIG tokens.
+
+After measuring a representative process peak, an optional packing guard can
+cap density before work starts:
+
+```bash
+iic pinn inventory \
+  --config configs/pinn-failure-grid.example.json \
+  --cuda-devices 0 1 2 3 \
+  --workers-per-gpu 4 \
+  --workers 16 \
+  --measured-gpu-worker-peak-gib 6.0 \
+  --measured-host-worker-peak-gib 10.0 \
+  --memory-reserve-fraction 0.15
+```
+
+Use the peak values from a completed representative shard, rounded upward.
+`pinn calibrate` accepts the same guard flags. It can also compare scalar
+diagnostics for matching `run_id` values against a CPU or lower-density
+baseline with `--baseline`; absolute and relative parity tolerances are
+configurable. A failed comparison is recorded as
+`numerical_parity_failure`, not silently accepted.
 
 Training and evaluation can be separated:
 
@@ -455,8 +485,8 @@ iic pinn launch \
   --stage training \
   --resume \
   --num-shards 845 \
-  --workers 8 \
-  --cuda-devices 0 1 2 3 4 5 6 7
+  --workers 4 \
+  --cuda-devices 0 1 2 3
 ```
 
 The `cpu` profile keeps autodiff and linear algebra on CPU in float64. The
@@ -465,6 +495,12 @@ matrices to CPU float64 linear algebra. The `gpu` profile keeps both phases on
 GPU. Worker density is a machine calibration parameter, not a fixed
 two-process limit. Evaluation can use the same 845 shards with a lower
 `--workers` value without changing shard identity.
+
+The launcher records completed results atomically as each process exits. On
+`SIGINT` or `SIGTERM`, it stops dispatching new shards, lets already isolated
+worker processes finish, records the unlaunched shard indices, and exits with
+an interrupted status. Rerunning with `--resume` continues from the validated
+artifacts.
 
 After every shard completes:
 

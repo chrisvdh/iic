@@ -68,6 +68,41 @@ def _parser() -> argparse.ArgumentParser:
     launch.add_argument("--cpu-threads-per-worker", type=int)
     launch.add_argument("--cuda-devices", type=int, nargs="+")
     launch.add_argument("--hessian-chunk-size", type=int)
+    launch.add_argument("--telemetry-interval-seconds", type=float, default=5.0)
+    launch.add_argument("--measured-gpu-worker-peak-gib", type=float)
+    launch.add_argument("--measured-host-worker-peak-gib", type=float)
+    launch.add_argument("--memory-reserve-fraction", type=float, default=0.15)
+    calibrate = actions.add_parser(
+        "calibrate",
+        help="Run selected real shards and summarize throughput and parity.",
+    )
+    calibrate.add_argument("--config", type=Path, required=True)
+    calibrate.add_argument("--output", type=Path, required=True)
+    calibrate.add_argument(
+        "--stage",
+        choices=("training", "evaluation", "both"),
+        default="both",
+    )
+    calibrate.add_argument("--resume", action="store_true")
+    calibrate.add_argument("--allow-source-mismatch", action="store_true")
+    calibrate.add_argument("--curvature-only", action="store_true")
+    calibrate.add_argument("--workers", type=int)
+    calibrate.add_argument("--num-shards", type=int, required=True)
+    calibrate.add_argument("--shard-indices", type=int, nargs="+", required=True)
+    calibrate.add_argument("--workers-per-gpu", type=int)
+    calibrate.add_argument("--cpu-threads-per-worker", type=int)
+    calibrate.add_argument("--cuda-devices", type=int, nargs="+")
+    calibrate.add_argument("--hessian-chunk-size", type=int)
+    calibrate.add_argument(
+        "--telemetry-interval-seconds", type=float, default=2.0
+    )
+    calibrate.add_argument("--measured-gpu-worker-peak-gib", type=float)
+    calibrate.add_argument("--measured-host-worker-peak-gib", type=float)
+    calibrate.add_argument("--memory-reserve-fraction", type=float, default=0.15)
+    calibrate.add_argument("--baseline", type=Path)
+    calibrate.add_argument("--parity-fields", nargs="+")
+    calibrate.add_argument("--parity-absolute-tolerance", type=float, default=1e-8)
+    calibrate.add_argument("--parity-relative-tolerance", type=float, default=1e-6)
     inventory = actions.add_parser(
         "inventory",
         help="Inspect the configured execution profile without computation.",
@@ -78,6 +113,9 @@ def _parser() -> argparse.ArgumentParser:
     inventory.add_argument("--cpu-threads-per-worker", type=int)
     inventory.add_argument("--cuda-devices", type=int, nargs="+")
     inventory.add_argument("--hessian-chunk-size", type=int)
+    inventory.add_argument("--measured-gpu-worker-peak-gib", type=float)
+    inventory.add_argument("--measured-host-worker-peak-gib", type=float)
+    inventory.add_argument("--memory-reserve-fraction", type=float, default=0.15)
     merge = actions.add_parser("merge", help="Strictly merge complete PINN shards")
     merge.add_argument("--config", type=Path, required=True)
     merge.add_argument("--inputs", type=Path, nargs="+", required=True)
@@ -112,11 +150,11 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _parser().parse_args()
     if args.domain == "pinn":
-        if args.action == "launch":
+        if args.action in {"launch", "calibrate"}:
             from .pinn.launcher import launch_shards
 
             config = load_pinn_config(args.config)
-            result = launch_shards(
+            launch_result = launch_shards(
                 config,
                 args.config,
                 args.output,
@@ -131,7 +169,44 @@ def main() -> None:
                 num_shards=args.num_shards,
                 shard_indices=args.shard_indices,
                 allow_source_mismatch=args.allow_source_mismatch,
+                telemetry_interval_seconds=args.telemetry_interval_seconds,
+                measured_gpu_worker_peak_gib=(
+                    args.measured_gpu_worker_peak_gib
+                ),
+                measured_host_worker_peak_gib=(
+                    args.measured_host_worker_peak_gib
+                ),
+                memory_reserve_fraction=args.memory_reserve_fraction,
             )
+            if args.action == "calibrate":
+                from .pinn.calibration import (
+                    DEFAULT_PARITY_FIELDS,
+                    summarize_calibration,
+                )
+                from .pinn.pipeline import _atomic_json
+
+                result = summarize_calibration(
+                    args.output,
+                    baseline=args.baseline,
+                    parity_fields=(
+                        args.parity_fields
+                        if args.parity_fields is not None
+                        else DEFAULT_PARITY_FIELDS
+                    ),
+                    parity_absolute_tolerance=(
+                        args.parity_absolute_tolerance
+                    ),
+                    parity_relative_tolerance=(
+                        args.parity_relative_tolerance
+                    ),
+                    write=False,
+                )
+                result["launcher_run_status"] = launch_result["run_status"]
+                if launch_result["run_status"] != "success":
+                    result["run_status"] = launch_result["run_status"]
+                _atomic_json(args.output / "calibration_summary.json", result)
+            else:
+                result = launch_result
         elif args.action == "inventory":
             from .pinn.launcher import runtime_inventory
 
@@ -143,6 +218,13 @@ def main() -> None:
                 cpu_threads_per_worker=args.cpu_threads_per_worker,
                 cuda_devices=args.cuda_devices,
                 hessian_chunk_size=args.hessian_chunk_size,
+                measured_gpu_worker_peak_gib=(
+                    args.measured_gpu_worker_peak_gib
+                ),
+                measured_host_worker_peak_gib=(
+                    args.measured_host_worker_peak_gib
+                ),
+                memory_reserve_fraction=args.memory_reserve_fraction,
             )
         elif args.action == "merge":
             from .pinn.merge import merge_shards
@@ -216,6 +298,9 @@ def main() -> None:
         "no_successful_training_runs",
         "partial_training_failure",
         "partial_evaluation_failure",
+        "partial_failure",
+        "interrupted",
+        "numerical_parity_failure",
     }:
         raise SystemExit(2)
 

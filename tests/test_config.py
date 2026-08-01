@@ -220,5 +220,5 @@ def test_failure_grid_example_expands_to_845_bea_free_runs():
     assert config.evaluation.profile == "mixed"
     assert config.evaluation.device == "cuda"
     assert config.evaluation.linear_algebra_device == "cpu"
-    assert config.evaluation.workers == 8
-    assert config.evaluation.cuda_devices == tuple(range(8))
+    assert config.evaluation.workers == 4
+    assert config.evaluation.cuda_devices == tuple(range(4))
