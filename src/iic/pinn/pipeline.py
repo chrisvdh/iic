@@ -224,6 +224,9 @@ def _checkpoint_manifest(
             "hessian_backend": config.evaluation.hessian_backend,
             "inverse_backend": config.evaluation.inverse_backend,
             "volume_backend": config.evaluation.volume_backend,
+            "spectral_absolute_floor": (
+                config.evaluation.spectral_absolute_floor
+            ),
         },
         "evaluation_mode": evaluation_mode,
     }
@@ -373,6 +376,9 @@ def validate_plan(
         "hessian_chunk_size": config.evaluation.hessian_chunk_size,
         "inverse_backend": config.evaluation.inverse_backend,
         "volume_backend": config.evaluation.volume_backend,
+        "spectral_absolute_floor": (
+            config.evaluation.spectral_absolute_floor
+        ),
         "workers": config.evaluation.workers,
         "workers_per_gpu": config.evaluation.workers_per_gpu,
         "cpu_threads_per_worker": config.evaluation.cpu_threads_per_worker,
@@ -902,7 +908,9 @@ def run_pipeline(
                         problem,
                         reference,
                         rhos=config.evaluation.finite_penalty_rhos,
-                        tolerance=config.evaluation.tolerance,
+                        tolerance=(
+                            config.evaluation.spectral_absolute_floor
+                        ),
                         max_memory_bytes=config.max_memory_bytes,
                         interpolation_threshold=(
                             config.gate.interpolation_threshold
@@ -949,7 +957,9 @@ def run_pipeline(
                     curvature = evaluate_curvature(
                         problem,
                         rhos=config.evaluation.finite_penalty_rhos,
-                        tolerance=config.evaluation.tolerance,
+                        tolerance=(
+                            config.evaluation.spectral_absolute_floor
+                        ),
                         max_memory_bytes=config.max_memory_bytes,
                         options=_evaluation_options(config),
                     )

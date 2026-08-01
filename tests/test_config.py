@@ -24,10 +24,25 @@ def test_smoke_config_is_public_reference_plan():
     assert config.evaluation.profile == "cpu"
     assert config.evaluation.compute_direct_iic is True
     assert config.evaluation.volume_backend == "exact"
+    assert config.evaluation.spectral_absolute_floor == pytest.approx(1e-14)
     assert config.data.collocation_seed == 0
     assert plan["estimand_kind"] == "full_iic"
     assert plan["reference_solve_enabled"] is True
     assert plan["full_iic_available"] is True
+    assert plan["spectral_absolute_floor"] == pytest.approx(1e-14)
+
+
+def test_legacy_spectral_tolerance_key_remains_an_alias(tmp_path):
+    raw = json.loads((ROOT / "configs" / "pinn-smoke.json").read_text())
+    del raw["evaluation"]["spectral_absolute_floor"]
+    raw["evaluation"]["tolerance"] = 1e-14
+    path = tmp_path / "legacy-tolerance.json"
+    path.write_text(json.dumps(raw))
+
+    config = load_config(path)
+
+    assert config.evaluation.spectral_absolute_floor == pytest.approx(1e-14)
+    assert config.evaluation.tolerance == pytest.approx(1e-14)
 
 
 def test_curvature_only_is_an_explicit_ablation():

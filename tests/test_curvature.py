@@ -76,6 +76,70 @@ def test_indefinite_hessian_is_retained_but_not_certified():
     assert result["inverse_diagnostics"]["backend"] == "solve"
 
 
+def test_analysis_floor_retains_raw_unresolved_kernel_direction():
+    theta = torch.zeros(2, dtype=torch.float64)
+    jacobian = torch.diag(
+        torch.tensor(
+            [math.sqrt(100.0), math.sqrt(2e-14)],
+            dtype=torch.float64,
+        )
+    )
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: jacobian @ candidate,
+        regularizer_fn=lambda candidate: 0.5 * candidate.square().sum(),
+    )
+
+    analysis = evaluate_dense_curvature(problem, tolerance=1e-14)
+    absolute_floor = evaluate_dense_curvature(problem, tolerance=1e-10)
+
+    resolution = analysis["kernel_spectral_resolution"]
+    assert analysis["kernel_definiteness"] == "positive_definite"
+    assert analysis["hard_curvature"] is not None
+    assert analysis["hard_curvature_certified"] is False
+    assert resolution["positive_under_analysis_floor"] is True
+    assert resolution["positive_sign_resolved"] is False
+    assert resolution["roundoff_scale"] > resolution["critical_value"]
+    assert analysis["inverse_diagnostics"]["relative_residual"] < 1e-12
+    assert len(analysis["kernel_eigenvalues"]) == 2
+    assert len(analysis["constraint_jacobian_singular_values"]) == 2
+    assert absolute_floor["kernel_definiteness"] == "singular"
+    assert absolute_floor["kernel_spectral_resolution"][
+        "analysis_floor"
+    ] == pytest.approx(1e-10)
+
+
+def test_unresolved_kernel_retains_candidate_but_withholds_hard_iic():
+    theta = torch.ones(2, dtype=torch.float64)
+    jacobian = torch.diag(
+        torch.tensor(
+            [math.sqrt(100.0), math.sqrt(2e-14)],
+            dtype=torch.float64,
+        )
+    )
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: jacobian @ (candidate - theta),
+        regularizer_fn=lambda candidate: 0.5 * candidate.square().sum(),
+    )
+
+    result = evaluate_dense_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        tolerance=1e-14,
+        interpolation_threshold=1e-12,
+    )
+
+    assert result["hard_iic_candidate"] is not None
+    assert result["hard_iic"] is None
+    assert result["kernel_spectral_resolution"][
+        "positive_under_analysis_floor"
+    ] is True
+    assert result["kernel_spectral_resolution"][
+        "positive_sign_resolved"
+    ] is False
+
+
 def test_dense_memory_guard_fails_before_jacobian_construction(monkeypatch):
     theta = torch.ones(4, dtype=torch.float64)
     problem = CurvatureProblem(

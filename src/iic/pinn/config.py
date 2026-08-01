@@ -118,11 +118,17 @@ class EvaluationConfig:
     cpu_threads_per_worker: int
     cuda_devices: tuple[int, ...]
     finite_penalty_rhos: tuple[float, ...]
-    tolerance: float
+    spectral_absolute_floor: float
     stationarity_absolute_tolerance: float
     stationarity_relative_tolerance: float
     max_memory_gib: float
     reference: ReferenceConfig
+
+    @property
+    def tolerance(self) -> float:
+        """Backward-compatible name for the spectral absolute floor."""
+
+        return self.spectral_absolute_floor
 
 
 @dataclass(frozen=True)
@@ -494,6 +500,20 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
     if reference.max_backtracks < 1 or reference.minimum_step <= 0:
         raise ValueError("reference backtracking controls must be positive")
 
+    if (
+        "spectral_absolute_floor" in evaluation_raw
+        and "tolerance" in evaluation_raw
+    ):
+        raise ValueError(
+            "provide only evaluation.spectral_absolute_floor; "
+            "evaluation.tolerance is its legacy alias"
+        )
+    spectral_absolute_floor = float(
+        evaluation_raw.get(
+            "spectral_absolute_floor",
+            evaluation_raw.get("tolerance", 1e-14),
+        )
+    )
     evaluation = EvaluationConfig(
         mode=str(evaluation_raw.get("mode", "full_iic")),
         profile=profile,
@@ -535,7 +555,7 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
         finite_penalty_rhos=tuple(
             float(value) for value in evaluation_raw.get("finite_penalty_rhos", [10.0, 100.0])
         ),
-        tolerance=float(evaluation_raw.get("tolerance", 1e-10)),
+        spectral_absolute_floor=spectral_absolute_floor,
         stationarity_absolute_tolerance=float(
             evaluation_raw.get(
                 "stationarity_absolute_tolerance",
@@ -583,7 +603,7 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
     if (
         not evaluation.finite_penalty_rhos
         or any(value <= 0 for value in evaluation.finite_penalty_rhos)
-        or evaluation.tolerance < 0
+        or evaluation.spectral_absolute_floor < 0
         or evaluation.stationarity_absolute_tolerance < 0
         or evaluation.stationarity_relative_tolerance < 0
         or evaluation.max_memory_gib <= 0

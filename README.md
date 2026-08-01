@@ -267,8 +267,20 @@ The Hessian-volume gap has four backends:
 
 The approximate paths use HVPs, Hutchinson probes, CG, and, where selected,
 Lanczos quadrature. They report estimator uncertainty and solver health and do
-not invent unavailable minimum eigenvalues. `numerical_jitter` is a separate,
-default-zero control and never changes the recorded training weight decay.
+not invent unavailable minimum eigenvalues. Spectral diagnostics deliberately
+separate two quantities: `spectral_absolute_floor`, denoted `tau_abs`, controls
+the analysis convention for pseudo-rank and pseudodeterminants; the separately
+reported numerical-resolution scale is `epsilon_mach * s_max`, where `s_max`
+is the largest absolute eigenvalue or singular value. No matrix-dimension
+factor is applied, and the roundoff estimate is not folded into `tau_abs`.
+
+`spectral_absolute_floor` defaults to `1e-14`. Roundoff does not silently zero
+a spectral direction. Raw eigenvalues, signed log-absolute determinants,
+eigenpair residuals, solve residuals, and numerical sign-resolution flags are
+retained. The legacy configuration name `tolerance` remains accepted as an
+alias. `numerical_jitter` is a separate, default-zero control and never
+changes the recorded training weight decay.
+
 Dense Hessian rows can be constructed in bounded-memory chunks with
 `hessian_chunk_size`; smaller chunks reduce peak accelerator memory at the
 cost of additional runtime.

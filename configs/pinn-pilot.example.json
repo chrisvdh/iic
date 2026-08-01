@@ -66,7 +66,7 @@
     "workers_per_gpu": 1,
     "cpu_threads_per_worker": 1,
     "finite_penalty_rhos": [10.0, 100.0],
-    "tolerance": 1e-10,
+    "spectral_absolute_floor": 1e-14,
     "stationarity_absolute_tolerance": 1e-7,
     "stationarity_relative_tolerance": 1e-7,
     "max_memory_gib": 8.0,

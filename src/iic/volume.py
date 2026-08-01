@@ -9,6 +9,8 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 
+from .spectral import spectral_resolution
+
 MatVec = Callable[[torch.Tensor], torch.Tensor]
 
 
@@ -197,12 +199,18 @@ def estimate_logdet_ratio(
             raise ValueError("exact volume evaluation requires both dense Hessians")
         star_sign, star_logabs = torch.linalg.slogdet(dense_hstar)
         zero_sign, zero_logabs = torch.linalg.slogdet(dense_h0)
-        star_pd = bool(
-            torch.all(torch.linalg.eigvalsh(dense_hstar) > spectral_tolerance)
+        star_eigenvalues = torch.linalg.eigvalsh(dense_hstar).detach()
+        zero_eigenvalues = torch.linalg.eigvalsh(dense_h0).detach()
+        star_resolution = spectral_resolution(
+            star_eigenvalues,
+            analysis_floor=spectral_tolerance,
         )
-        zero_pd = bool(
-            torch.all(torch.linalg.eigvalsh(dense_h0) > spectral_tolerance)
+        zero_resolution = spectral_resolution(
+            zero_eigenvalues,
+            analysis_floor=spectral_tolerance,
         )
+        star_pd = star_resolution["positive_sign_resolved"]
+        zero_pd = zero_resolution["positive_sign_resolved"]
         valid = star_pd and zero_pd
         return {
             "backend": "exact",
@@ -217,6 +225,8 @@ def estimate_logdet_ratio(
             "positive_definite_observed": valid,
             "available": True,
             "solver_failures": 0,
+            "hstar_spectral_resolution": star_resolution,
+            "h0_spectral_resolution": zero_resolution,
         }
 
     probes = _rademacher(

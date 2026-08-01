@@ -11,10 +11,12 @@ from typing import Any, Optional
 import torch
 
 from .reference import ReferencePoint
+from .spectral import spectral_resolution
 from .telemetry import PhaseTimer, peak_memory_record, reset_cuda_peak_memory
 from .volume import VolumeOptions, conjugate_gradient, estimate_logdet_ratio
 
 TensorFn = Callable[[torch.Tensor], torch.Tensor]
+IIC_EVALUATION_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -53,12 +55,34 @@ def _torch_dtype(name: str) -> torch.dtype:
     raise ValueError("linear_algebra_dtype must be float32 or float64")
 
 
-def _spectral_summary(matrix: torch.Tensor, tolerance: float) -> dict[str, Any]:
-    eigenvalues = torch.linalg.eigvalsh(
-        0.5 * (matrix + matrix.T)
-    ).detach()
+def _spectral_summary(
+    matrix: torch.Tensor,
+    tolerance: float,
+    *,
+    compute_residuals: bool = False,
+) -> dict[str, Any]:
+    symmetric = 0.5 * (matrix + matrix.T)
+    residuals = None
+    if compute_residuals:
+        eigenvalues, eigenvectors = torch.linalg.eigh(symmetric)
+        eigenvalues = eigenvalues.detach()
+        eigenvectors = eigenvectors.detach()
+        residuals = torch.linalg.vector_norm(
+            symmetric.detach() @ eigenvectors
+            - eigenvectors * eigenvalues.unsqueeze(0),
+            dim=0,
+        )
+    else:
+        eigenvalues = torch.linalg.eigvalsh(symmetric).detach()
+    resolution = spectral_resolution(
+        eigenvalues,
+        analysis_floor=tolerance,
+        residuals=residuals,
+    )
     nonzero = torch.abs(eigenvalues) > tolerance
-    nonsingular = bool(torch.all(nonzero))
+    raw_nonzero = eigenvalues != 0.0
+    nonsingular_under_floor = bool(torch.all(nonzero))
+    raw_nonsingular = bool(torch.all(raw_nonzero))
     if bool(torch.all(eigenvalues > tolerance)):
         status = "positive_definite"
     elif bool(torch.any(eigenvalues < -tolerance)):
@@ -70,24 +94,40 @@ def _spectral_summary(matrix: torch.Tensor, tolerance: float) -> dict[str, Any]:
         if bool(torch.any(nonzero))
         else 0.0
     )
+    raw_logabsdet = (
+        float(torch.log(torch.abs(eigenvalues)).sum().detach())
+        if raw_nonsingular
+        else None
+    )
     return {
         "status": status,
-        "positive_definite_verified": status == "positive_definite",
+        "positive_under_analysis_floor": status == "positive_definite",
+        "positive_definite_verified": resolution["positive_sign_resolved"],
         "min_eigenvalue": float(eigenvalues.min()),
         "max_eigenvalue": float(eigenvalues.max()),
-        "num_negative": int((eigenvalues < -tolerance).sum()),
-        "num_near_zero": int((torch.abs(eigenvalues) <= tolerance).sum()),
-        "num_nonpositive": int((eigenvalues <= tolerance).sum()),
+        "num_negative": int(
+            (eigenvalues < -tolerance).sum()
+        ),
+        "num_near_zero": int(
+            (torch.abs(eigenvalues) <= tolerance).sum()
+        ),
+        "num_nonpositive": int(
+            (eigenvalues <= tolerance).sum()
+        ),
         "determinant_sign": (
             int(torch.prod(torch.sign(eigenvalues)).item())
-            if nonsingular
+            if raw_nonsingular
             else 0
         ),
         "logdet": pseudo if status == "positive_definite" else None,
-        "logabsdet": pseudo if nonsingular else None,
+        "logabsdet": raw_logabsdet,
         "pseudo_logabsdet": pseudo,
         "pseudo_rank": int(nonzero.sum()),
-        "nonsingular_verified": nonsingular,
+        "nonsingular_under_analysis_floor": nonsingular_under_floor,
+        "nonsingular_verified": resolution[
+            "nonzero_numerically_resolved"
+        ],
+        "resolution": resolution,
         "eigenvalues": eigenvalues,
     }
 
@@ -120,6 +160,15 @@ def _factorize_dense(
             "pseudo_logabsdet": logdet,
             "pseudo_rank": size,
             "nonsingular_verified": True,
+            "resolution": {
+                "analysis_floor": float(tolerance),
+                "roundoff_scale": None,
+                "spectral_scale": None,
+                "machine_epsilon": float(torch.finfo(matrix.dtype).eps),
+                "positive_under_analysis_floor": True,
+                "positive_sign_resolved": True,
+                "rule": "positive definiteness verified by Cholesky",
+            },
             "eigenvalues": None,
         }
         return summary, factor, {
@@ -208,6 +257,21 @@ def _solve_kernel(
     hstar_matvec: Callable[[torch.Tensor], torch.Tensor],
     options: EvaluationOptions,
 ) -> tuple[Optional[torch.Tensor], dict[str, Any]]:
+    def dense_residual_record(solved: torch.Tensor) -> dict[str, float]:
+        if hstar is None:
+            raise ValueError("dense residual requires an explicit Hessian")
+        rhs = a_star.T
+        residual_norm = torch.linalg.vector_norm(hstar @ solved - rhs)
+        rhs_norm = torch.linalg.vector_norm(rhs)
+        denominator = max(
+            float(rhs_norm),
+            torch.finfo(rhs.dtype).tiny,
+        )
+        return {
+            "absolute_residual": float(residual_norm),
+            "relative_residual": float(residual_norm) / denominator,
+        }
+
     if options.inverse_backend == "solve":
         if hstar is None:
             raise ValueError("dense solve requires an explicit Hessian")
@@ -223,6 +287,7 @@ def _solve_kernel(
                 else "solve"
             ),
             "available": True,
+            **dense_residual_record(solved),
             "column_records": [],
         }
     if options.inverse_backend == "pinv":
@@ -233,6 +298,7 @@ def _solve_kernel(
             "backend": "pinv",
             "available": True,
             "continuation": "moore_penrose",
+            **dense_residual_record(solved),
             "column_records": [],
         }
 
@@ -269,6 +335,9 @@ def _solve_kernel(
     return a_star @ solved, {
         "backend": "cg",
         "available": True,
+        "max_relative_residual": max(
+            record["relative_residual"] for record in records
+        ),
         "column_records": records,
     }
 
@@ -374,12 +443,24 @@ def _build_star(
     if kernel is not None:
         with timer.phase("constraint_kernel_spectral", la_device):
             kernel = 0.5 * (kernel + kernel.T)
-            kernel_summary = _spectral_summary(kernel, tolerance)
+            kernel_summary = _spectral_summary(
+                kernel,
+                tolerance,
+                compute_residuals=True,
+            )
     with timer.phase("constraint_jacobian_spectral", la_device):
         gram = a_star @ a_star.T
         sharpness = 0.5 * (gram + gram.T)
-        sharpness_summary = _spectral_summary(sharpness, tolerance)
+        sharpness_summary = _spectral_summary(
+            sharpness,
+            tolerance,
+            compute_residuals=True,
+        )
         singular_values = torch.linalg.svdvals(a_star).detach()
+    rank_resolution = spectral_resolution(
+        singular_values,
+        analysis_floor=tolerance,
+    )
     rank = int((singular_values > tolerance).sum())
     return {
         "theta": theta,
@@ -398,6 +479,11 @@ def _build_star(
         "full_row_rank": rank == a_star.shape[0],
         "sigma_min": float(singular_values.min()),
         "sigma_max": float(singular_values.max()),
+        "singular_values": singular_values,
+        "rank_resolution": rank_resolution,
+        "full_row_rank_numerically_resolved": bool(
+            singular_values.min() > rank_resolution["roundoff_scale"]
+        ),
         "memory_estimate": estimate,
         "la_device": la_device,
         "la_dtype": la_dtype,
@@ -431,7 +517,7 @@ def _base_record(
         else None
     )
     record: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": IIC_EVALUATION_SCHEMA_VERSION,
         "estimand_kind": "curvature_only",
         "score_status": "component_only",
         "normalization_convention": "constraint_map_dimension",
@@ -462,6 +548,7 @@ def _base_record(
         "hessian_chunk_size": options.hessian_chunk_size,
         "h_definiteness": h["status"],
         "h_positive_definite_verified": h["positive_definite_verified"],
+        "h_spectral_resolution": h.get("resolution"),
         "hstar_factorization": star["hstar_factorization"],
         "logdet_Hstar": h.get("logdet"),
         "logabsdet_Hstar": h.get("logabsdet"),
@@ -473,6 +560,13 @@ def _base_record(
         "kernel_pseudo_logabsdet": (
             k["pseudo_logabsdet"] if k is not None else None
         ),
+        "kernel_eigenvalues": (
+            k["eigenvalues"].detach().cpu().tolist()
+            if k is not None else None
+        ),
+        "kernel_spectral_resolution": (
+            k["resolution"] if k is not None else None
+        ),
         "hard_curvature": hard_curvature,
         "hard_curvature_signed_logabs": hard_signed,
         "hard_curvature_pseudo": hard_pseudo,
@@ -481,16 +575,26 @@ def _base_record(
             and k is not None
             and k["positive_definite_verified"]
             and star["full_row_rank"]
+            and star["full_row_rank_numerically_resolved"]
         ),
         "constraint_jacobian_rank": star["rank"],
         "constraint_jacobian_full_row_rank": star["full_row_rank"],
         "constraint_jacobian_sigma_min": star["sigma_min"],
         "constraint_jacobian_sigma_max": star["sigma_max"],
+        "constraint_jacobian_singular_values": star[
+            "singular_values"
+        ].detach().cpu().tolist(),
+        "constraint_jacobian_rank_resolution": star["rank_resolution"],
+        "constraint_jacobian_full_row_rank_numerically_resolved": star[
+            "full_row_rank_numerically_resolved"
+        ],
         "sharpness": (
             sharp["logdet"] / n if sharp["logdet"] is not None else None
         ),
         "sharpness_pseudo": sharp["pseudo_logabsdet"] / n,
         "sharpness_certified": sharp["positive_definite_verified"],
+        "sharpness_spectral_resolution": sharp["resolution"],
+        "spectral_absolute_floor": float(tolerance),
         "dataset_correction": -math.log(n),
         "regularizer_gap": None,
         "energy_term": None,
@@ -518,7 +622,9 @@ def _base_record(
         )
         for rho in rhos:
             shifted_summary = _spectral_summary(
-                star["kernel"] + identity / float(rho), tolerance
+                star["kernel"] + identity / float(rho),
+                tolerance,
+                compute_residuals=True,
             )
             finite[f"{float(rho):g}"] = {
                 "rho": float(rho),
@@ -533,8 +639,9 @@ def _base_record(
                 "pseudo_value": shifted_summary["pseudo_logabsdet"] / n,
                 "shifted_definiteness": shifted_summary["status"],
                 "determinant_sign": shifted_summary["determinant_sign"],
+                "spectral_resolution": shifted_summary["resolution"],
                 "algebraically_valid": shifted_summary[
-                    "positive_definite_verified"
+                    "positive_under_analysis_floor"
                 ],
                 "curvature_certified": bool(
                     h["positive_definite_verified"]
@@ -549,7 +656,7 @@ def evaluate_curvature(
     problem: EvaluationProblem,
     *,
     rhos: Sequence[float] = (10.0, 100.0),
-    tolerance: float = 1e-10,
+    tolerance: float = 1e-14,
     max_memory_bytes: Optional[int] = None,
     options: EvaluationOptions = EvaluationOptions(),
 ) -> dict[str, Any]:
@@ -602,7 +709,7 @@ def evaluate_iic(
     reference: ReferencePoint,
     *,
     rhos: Sequence[float] = (10.0, 100.0),
-    tolerance: float = 1e-10,
+    tolerance: float = 1e-14,
     max_memory_bytes: Optional[int] = None,
     interpolation_threshold: Optional[float] = None,
     stationarity_absolute_tolerance: float = 1e-7,
@@ -774,7 +881,7 @@ def evaluate_iic(
         else record["interp_residual"] <= interpolation_threshold
     )
     kernel = star["kernel_summary"]
-    conventional_complete = bool(
+    candidate_complete = bool(
         energy is not None
         and volume["value"] is not None
         and kernel is not None
@@ -785,11 +892,14 @@ def evaluate_iic(
         energy
         + (kernel["logdet"] + volume["value"]) / n
         + record["dataset_correction"]
-        if conventional_complete and kernel is not None
+        if candidate_complete and kernel is not None
         else None
     )
     theory_valid = bool(
-        conventional_complete
+        candidate_complete
+        and kernel is not None
+        and kernel["positive_definite_verified"]
+        and star["full_row_rank_numerically_resolved"]
         and reference.converged
         and interpolation_valid
         and stationarity_valid
@@ -861,6 +971,7 @@ def evaluate_iic(
             candidate is not None
             and reference.converged
             and stationarity_valid
+            and shifted["curvature_certified"]
         )
         signed = (
             energy
@@ -926,6 +1037,7 @@ def evaluate_iic(
             "h0_positive_definite_verified": h0_summary[
                 "positive_definite_verified"
             ],
+            "h0_spectral_resolution": h0_summary.get("resolution"),
             "h0_factorization": h0_factorization,
             "logdet_H0": h0_summary.get("logdet"),
             "logabsdet_H0": h0_summary.get("logabsdet"),
@@ -975,7 +1087,7 @@ def evaluate_iic(
             "soft_iic": siic_values,
             "soft_iic_candidate": siic_candidates,
             "reference_valid": reference.converged,
-            "numerical_terms_complete": conventional_complete,
+            "numerical_terms_complete": candidate_complete,
             "diagnostic_continuations": {
                 "not_theory_valid_iic": True,
                 "hiic_signed_logabs": signed_hiic,
@@ -1035,8 +1147,10 @@ def _direct_iic(
     if tangent_basis.shape[1] == 0:
         tangent_summary = {
             "status": "empty_tangent_space",
+            "positive_under_analysis_floor": True,
             "positive_definite_verified": True,
             "logdet": 0.0,
+            "resolution": None,
         }
     else:
         tangent_summary = _spectral_summary(
@@ -1066,6 +1180,9 @@ def _direct_iic(
         "value": value,
         "tangent_dimension": int(tangent_basis.shape[1]),
         "tangent_hessian_status": tangent_summary["status"],
+        "tangent_hessian_spectral_resolution": tangent_summary.get(
+            "resolution"
+        ),
         "backend": "explicit_svd_nullspace",
     }
 
@@ -1076,7 +1193,7 @@ def _failure(
     error: Exception,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 2,
+        "schema_version": IIC_EVALUATION_SCHEMA_VERSION,
         "estimand_kind": estimand,
         "score_status": "geometry_failed",
         "run_status": "hessian_solve_failed",
@@ -1097,7 +1214,7 @@ def evaluate_dense_curvature(
     problem: EvaluationProblem,
     *,
     rhos: Sequence[float] = (10.0, 100.0),
-    tolerance: float = 1e-10,
+    tolerance: float = 1e-14,
     max_memory_bytes: Optional[int] = None,
 ) -> dict[str, Any]:
     """Backward-compatible explicit curvature entry point."""
@@ -1115,7 +1232,7 @@ def evaluate_dense_iic(
     reference: ReferencePoint,
     *,
     rhos: Sequence[float] = (10.0, 100.0),
-    tolerance: float = 1e-10,
+    tolerance: float = 1e-14,
     max_memory_bytes: Optional[int] = None,
     interpolation_threshold: Optional[float] = None,
     kkt_absolute_tolerance: float = 1e-7,
