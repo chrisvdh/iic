@@ -25,9 +25,7 @@ $h:\mathbb R^p\rightarrow\mathbb R^N$ be its vector of scalar interpolation
 constraints, and let $R:\mathbb R^p\rightarrow\mathbb R$ be the full
 regularizer. The interpolating manifold is
 
-$$
-\mathcal M=\{\theta:h(\theta)=0\}.
-$$
+$$\mathcal{M}=\lbrace\theta:h(\theta)=0\rbrace.$$
 
 The hard-limit calculation compares a trained parameter $\theta_\star$ on
 $\mathcal M$, interpreted as a constrained minimum of $R$, with an
@@ -54,16 +52,11 @@ $$
 K_H=A_\star H_\star^{-1}A_\star^\mathsf{T}.
 $$
 
-For $N=\dim h$, the implemented hard-limit score is
+For $N=\dim h$, the implemented hard-limit score is defined below.
 
-$$
-\mathrm{IIC}_{\mathrm{hard}}
-=
-\log\!\left(R(\theta_\star)-R(\theta_0)\right)
-+\frac{\log\det K_H}{N}
-+\frac{\log\det H_\star-\log\det H_0}{N}
--\log N.
-$$
+### Hard-limit score: $\mathrm{IIC}_{\mathrm{hard}}$
+
+$$\mathrm{IIC}_{\mathrm{hard}}=\log\left(R(\theta_\star)-R(\theta_0)\right)+\frac{\log\det K_H}{N}+\frac{\log\det H_\star-\log\det H_0}{N}-\log N.$$
 
 The four contributions are the energy gap, constraint geometry,
 Hessian-volume gap, and dataset correction, respectively.
@@ -90,19 +83,11 @@ one.
 The finite-penalty extension replaces the hard constraint-kernel determinant
 by a regularised determinant. Using $\kappa>0$ for the penalty parameter, so
 that it is not confused with the reaction coefficient in the PINN below, the
-implemented score is
+implemented score is defined below.
 
-$$
-\mathrm{IIC}_{\mathrm{soft}}(\kappa)
-=
-\log\!\left(R(\theta_\star)-R(\theta_0)\right)
-+\frac{
-  \log\det\!\left(K_H+\kappa^{-1}I\right)
-  +\log\det H_\star
-  -\log\det H_0
-}{N}
--\log N.
-$$
+### Finite-penalty score: $\mathrm{IIC}_{\mathrm{soft}}(\kappa)$
+
+$$\mathrm{IIC}_{\mathrm{soft}}(\kappa)=\log\left(R(\theta_\star)-R(\theta_0)\right)+\frac{\log\det\left(K_H+\kappa^{-1}I\right)+\log\det H_\star-\log\det H_0}{N}-\log N.$$
 
 The hard kernel is recovered as $\kappa\rightarrow\infty$ when the limit is
 well defined. Finite $\kappa$ regularises weak or null constraint directions
@@ -135,7 +120,7 @@ The initial condition and periodic boundary conditions are
 
 $$
 u(x,0)
-=\exp\!\left[-\frac{1}{2}
+=\exp\left[-\frac{1}{2}
 \left(\frac{x-\pi}{\pi/4}\right)^2\right],
 \qquad
 u(0,t)=u(2\pi,t).
