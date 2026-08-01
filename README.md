@@ -34,7 +34,7 @@ $\mathcal M$, interpreted as a constrained minimum of $R$, with an
 unconstrained regularizer minimum
 
 $$
-\theta_0\in\underset{\theta}{\mathrm{arg\,min}}\,R(\theta).
+\theta_0\in\arg\min_{\theta}R(\theta).
 $$
 
 Writing $A_\star=Dh(\theta_\star)$, the core package defines
@@ -59,14 +59,14 @@ For $N=\dim h$, the implemented hard-limit score is
 $$
 \mathrm{IIC}_{\mathrm{hard}}
 =
-\underbrace{\log\!\left(R(\theta_\star)-R(\theta_0)\right)}_{
-  \text{energy gap}}
-+\underbrace{\frac{\log\det K_H}{N}}_{
-  \text{constraint geometry}}
-+\underbrace{\frac{\log\det H_\star-\log\det H_0}{N}}_{
-  \text{Hessian-volume gap}}
--\underbrace{\log N}_{\text{dataset correction}}.
+\log\!\left(R(\theta_\star)-R(\theta_0)\right)
++\frac{\log\det K_H}{N}
++\frac{\log\det H_\star-\log\det H_0}{N}
+-\log N.
 $$
+
+The four contributions are the energy gap, constraint geometry,
+Hessian-volume gap, and dataset correction, respectively.
 
 The Hessian-volume gap may equivalently be read as
 $N^{-1}\log\det(H_\star H_0^{-1})$ when the required inverses and
@@ -240,7 +240,7 @@ The same assembled $R$ is used without modification to solve numerically for
 $\theta_0$, form the energy gap, and construct $H_\star$ and $H_0$.
 The current nonlinear reference solver performs deterministic multistart
 gradient descent with Armijo backtracking. It records a stationary candidate
-and does not claim to certify a global minimum.
+without global-minimum certification.
 
 ## Numerical backends
 
@@ -294,9 +294,9 @@ Signed-log-absolute and pseudo-log-determinant continuations are stored under
 `diagnostic_continuations`, with matrix flags, and are never labelled
 theory-valid IIC values.
 
-## Current implementation
+## Available implementation
 
-This is a deliberately narrow research implementation:
+The package currently provides:
 
 - exact and matrix-free full-score differentiation for reaction-diffusion
   PINNs;
@@ -322,12 +322,6 @@ as valid determinants.
 `hard_iic_candidate` and `soft_iic_candidate` retain computable formula values
 for descriptive all-model analysis. The unqualified `hard_iic` and `soft_iic`
 fields are populated only when their recorded theory-validity conditions hold.
-
-The repository contains no manuscript, paper results, pretrained weights, or
-experimental datasets. The included PINN workflow is a computational
-demonstration, and no claim is made that its diagnostics predict
-generalisation. The API is unstable while the underlying numerical programme
-is being developed.
 
 ## Install
 
@@ -375,18 +369,15 @@ iic pinn run \
   --curvature-only
 ```
 
-The larger `configs/pinn-pilot.example.json` is an L-BFGS illustrative
-protocol, not a frozen paper experiment. It trains in float32 and evaluates
-curvature in float64. Its fixed collocation seed is independent of the model
-initialization seeds.
+The larger `configs/pinn-pilot.example.json` uses L-BFGS training in float32
+and evaluates curvature in float64. Its fixed collocation seed is independent
+of the model initialization seeds.
 
 `configs/pinn-failure-grid.example.json` expands a decimal 13-by-13
 reaction--diffusion grid with five model seeds (845 runs), the four-by-50
 network, 1,000 fixed collocation points, L-BFGS training, and
-`R_init + R_PDE` evaluation. It is an executable design example, not an
-authorization to spend the corresponding compute or a frozen paper protocol.
-Its matched He-Gaussian initialization is a deliberate change from the
-historical implementation's PyTorch default initialization.
+`R_init + R_PDE` evaluation. Its matched He-Gaussian initialization differs
+from PyTorch's default initialization.
 
 ### Shards and resumption
 
@@ -536,9 +527,9 @@ iic pinn analyze \
   --output runs/pinn-pilot-analysis.json
 ```
 
-The all-model table is deliberately labelled as candidate-score analysis.
-Hard-limit claims must use the recorded interpolation, constrained
-stationarity, reference, rank, and definiteness statuses.
+The all-model table is labelled as candidate-score analysis. A hard-limit
+interpretation requires the recorded interpolation, constrained stationarity,
+reference, rank, and definiteness statuses.
 
 ## Safety and reproducibility
 
