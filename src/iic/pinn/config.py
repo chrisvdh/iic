@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 import hashlib
 import json
@@ -179,6 +179,43 @@ class PinnRunConfig:
     @property
     def max_memory_bytes(self) -> int:
         return int(self.evaluation.max_memory_gib * 1024**3)
+
+
+def apply_evaluation_runtime_overrides(
+    config: PinnRunConfig,
+    *,
+    dtype: Optional[str] = None,
+    linear_algebra_device: Optional[str] = None,
+    hessian_chunk_size: Optional[int] = None,
+) -> PinnRunConfig:
+    """Apply fingerprint-neutral controls to one evaluation process."""
+
+    evaluation = config.evaluation
+    if dtype is not None:
+        if dtype not in {"float32", "float64"}:
+            raise ValueError("evaluation dtype override must be float32 or float64")
+        evaluation = replace(evaluation, dtype=dtype)
+    if linear_algebra_device is not None:
+        if linear_algebra_device not in {"cpu", "cuda"}:
+            raise ValueError("linear algebra device override must be cpu or cuda")
+        profile = {
+            ("cpu", "cpu"): "cpu",
+            ("cuda", "cpu"): "mixed",
+            ("cuda", "cuda"): "gpu",
+        }.get((evaluation.device, linear_algebra_device), "custom")
+        evaluation = replace(
+            evaluation,
+            profile=profile,
+            linear_algebra_device=linear_algebra_device,
+        )
+    if hessian_chunk_size is not None:
+        if hessian_chunk_size < 1:
+            raise ValueError("hessian chunk size override must be positive")
+        evaluation = replace(
+            evaluation,
+            hessian_chunk_size=hessian_chunk_size,
+        )
+    return replace(config, evaluation=evaluation)
 
 
 def _required(

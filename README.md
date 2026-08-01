@@ -547,6 +547,7 @@ iic pinn launch \
   --resume \
   --force-evaluation \
   --evaluation-dtype float64 \
+  --linear-algebra-device cpu \
   --allow-source-mismatch \
   --num-shards 845 \
   --workers 4 \
@@ -560,6 +561,14 @@ The compatibility config preserves the original checkpoint fingerprint; the
 runtime `--evaluation-dtype` override deliberately does not alter it. New
 training runs should use `configs/pinn-failure-grid.example.json`, whose native
 evaluation dtype is already float64.
+
+The `--linear-algebra-device` override is also fingerprint-neutral. Use `cpu`
+for the mixed profile or `cuda` to keep the dense float64 LU factorisation and
+solves on the accelerator. The effective profile and device are recorded in
+the launcher manifest, stage status, checkpoint-evaluation metadata, and final
+rows. Calibrate both choices on the target machine before fixing the production
+backend; changing this runtime control does not change shard identity or
+invalidate the reused training checkpoint.
 
 The launcher records completed results atomically as each process exits. On
 `SIGINT` or `SIGTERM`, it stops dispatching new shards, lets already isolated

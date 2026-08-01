@@ -7,7 +7,10 @@ from dataclasses import replace
 import json
 from pathlib import Path
 
-from .pinn.config import load_config as load_pinn_config
+from .pinn.config import (
+    apply_evaluation_runtime_overrides,
+    load_config as load_pinn_config,
+)
 from .pinn.pipeline import run_pipeline, validate_plan
 
 
@@ -48,6 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--hessian-chunk-size", type=int)
     run.add_argument("--evaluation-dtype", choices=("float32", "float64"))
+    run.add_argument("--linear-algebra-device", choices=("cpu", "cuda"))
     run.add_argument(
         "--force-evaluation",
         action="store_true",
@@ -67,6 +71,9 @@ def _parser() -> argparse.ArgumentParser:
     compare_boundary.add_argument("--hessian-chunk-size", type=int)
     compare_boundary.add_argument(
         "--evaluation-dtype", choices=("float32", "float64")
+    )
+    compare_boundary.add_argument(
+        "--linear-algebra-device", choices=("cpu", "cuda")
     )
     launch = actions.add_parser(
         "launch",
@@ -90,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     launch.add_argument("--cuda-devices", type=int, nargs="+")
     launch.add_argument("--hessian-chunk-size", type=int)
     launch.add_argument("--evaluation-dtype", choices=("float32", "float64"))
+    launch.add_argument("--linear-algebra-device", choices=("cpu", "cuda"))
     launch.add_argument("--force-evaluation", action="store_true")
     launch.add_argument("--telemetry-interval-seconds", type=float, default=5.0)
     launch.add_argument("--measured-gpu-worker-peak-gib", type=float)
@@ -117,6 +125,7 @@ def _parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--cuda-devices", type=int, nargs="+")
     calibrate.add_argument("--hessian-chunk-size", type=int)
     calibrate.add_argument("--evaluation-dtype", choices=("float32", "float64"))
+    calibrate.add_argument("--linear-algebra-device", choices=("cpu", "cuda"))
     calibrate.add_argument("--force-evaluation", action="store_true")
     calibrate.add_argument(
         "--telemetry-interval-seconds", type=float, default=2.0
@@ -138,6 +147,8 @@ def _parser() -> argparse.ArgumentParser:
     inventory.add_argument("--cpu-threads-per-worker", type=int)
     inventory.add_argument("--cuda-devices", type=int, nargs="+")
     inventory.add_argument("--hessian-chunk-size", type=int)
+    inventory.add_argument("--evaluation-dtype", choices=("float32", "float64"))
+    inventory.add_argument("--linear-algebra-device", choices=("cpu", "cuda"))
     inventory.add_argument("--measured-gpu-worker-peak-gib", type=float)
     inventory.add_argument("--measured-host-worker-peak-gib", type=float)
     inventory.add_argument("--memory-reserve-fraction", type=float, default=0.15)
@@ -192,6 +203,7 @@ def main() -> None:
                 cuda_devices=args.cuda_devices,
                 hessian_chunk_size=args.hessian_chunk_size,
                 evaluation_dtype=args.evaluation_dtype,
+                linear_algebra_device=args.linear_algebra_device,
                 force_evaluation=args.force_evaluation,
                 num_shards=args.num_shards,
                 shard_indices=args.shard_indices,
@@ -245,6 +257,8 @@ def main() -> None:
                 cpu_threads_per_worker=args.cpu_threads_per_worker,
                 cuda_devices=args.cuda_devices,
                 hessian_chunk_size=args.hessian_chunk_size,
+                evaluation_dtype=args.evaluation_dtype,
+                linear_algebra_device=args.linear_algebra_device,
                 measured_gpu_worker_peak_gib=(
                     args.measured_gpu_worker_peak_gib
                 ),
@@ -284,22 +298,12 @@ def main() -> None:
             from .pinn.boundary_comparison import run_boundary_role_comparison
 
             config = load_pinn_config(args.config)
-            if args.hessian_chunk_size is not None:
-                config = replace(
-                    config,
-                    evaluation=replace(
-                        config.evaluation,
-                        hessian_chunk_size=args.hessian_chunk_size,
-                    ),
-                )
-            if args.evaluation_dtype is not None:
-                config = replace(
-                    config,
-                    evaluation=replace(
-                        config.evaluation,
-                        dtype=args.evaluation_dtype,
-                    ),
-                )
+            config = apply_evaluation_runtime_overrides(
+                config,
+                dtype=args.evaluation_dtype,
+                linear_algebra_device=args.linear_algebra_device,
+                hessian_chunk_size=args.hessian_chunk_size,
+            )
             if args.dry_run:
                 result = {
                     **validate_plan(
@@ -328,22 +332,12 @@ def main() -> None:
                 )
         else:
             config = load_pinn_config(args.config)
-            if args.hessian_chunk_size is not None:
-                config = replace(
-                    config,
-                    evaluation=replace(
-                        config.evaluation,
-                        hessian_chunk_size=args.hessian_chunk_size,
-                    ),
-                )
-            if args.evaluation_dtype is not None:
-                config = replace(
-                    config,
-                    evaluation=replace(
-                        config.evaluation,
-                        dtype=args.evaluation_dtype,
-                    ),
-                )
+            config = apply_evaluation_runtime_overrides(
+                config,
+                dtype=args.evaluation_dtype,
+                linear_algebra_device=args.linear_algebra_device,
+                hessian_chunk_size=args.hessian_chunk_size,
+            )
             if args.dry_run:
                 result = validate_plan(
                     config,

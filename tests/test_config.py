@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from iic.pinn.config import load_config
+from iic.pinn.config import apply_evaluation_runtime_overrides, load_config
 from iic.pinn.model import MLP
 from iic.pinn.pipeline import validate_plan
 
@@ -250,3 +250,23 @@ def test_failure_grid_example_expands_to_845_bea_free_runs():
     assert config.evaluation.linear_algebra_device == "cpu"
     assert config.evaluation.workers == 4
     assert config.evaluation.cuda_devices == tuple(range(4))
+
+
+def test_evaluation_runtime_override_preserves_checkpoint_fingerprint():
+    config = load_config(
+        ROOT / "configs" / "pinn-failure-grid.float32-checkpoint-compatibility.json"
+    )
+
+    overridden = apply_evaluation_runtime_overrides(
+        config,
+        dtype="float64",
+        linear_algebra_device="cuda",
+        hessian_chunk_size=16,
+    )
+
+    assert overridden.fingerprint == config.fingerprint
+    assert overridden.raw == config.raw
+    assert overridden.evaluation.dtype == "float64"
+    assert overridden.evaluation.linear_algebra_device == "cuda"
+    assert overridden.evaluation.profile == "gpu"
+    assert overridden.evaluation.hessian_chunk_size == 16

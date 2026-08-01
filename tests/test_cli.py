@@ -132,6 +132,37 @@ def test_cli_run_dry_run_accepts_hessian_chunk_override(tmp_path):
     assert not output.exists()
 
 
+def test_cli_run_dry_run_records_linear_algebra_device_override(tmp_path):
+    output = tmp_path / "runtime-override"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "iic.cli",
+            "pinn",
+            "run",
+            "--config",
+            str(ROOT / "configs" / "pinn-smoke.json"),
+            "--output",
+            str(output),
+            "--linear-algebra-device",
+            "cpu",
+            "--evaluation-dtype",
+            "float64",
+            "--dry-run",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_source_environment(),
+    )
+    result = json.loads(completed.stdout)
+    assert result["execution_profile"] == "cpu"
+    assert result["linear_algebra_device"] == "cpu"
+    assert result["evaluation_dtype"] == "float64"
+    assert not output.exists()
+
+
 def test_cli_inventory_performs_no_computation_or_output_write(tmp_path):
     output = tmp_path / "unused"
     completed = subprocess.run(

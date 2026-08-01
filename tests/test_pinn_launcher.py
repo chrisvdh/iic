@@ -99,6 +99,7 @@ def test_launcher_forwards_forced_float64_reevaluation(tmp_path, monkeypatch):
         workers=1,
         cuda_devices=[0],
         evaluation_dtype="float64",
+        linear_algebra_device="cuda",
         force_evaluation=True,
         num_shards=845,
         shard_indices=[0],
@@ -108,6 +109,32 @@ def test_launcher_forwards_forced_float64_reevaluation(tmp_path, monkeypatch):
     assert "--resume" in command
     assert "--force-evaluation" in command
     assert command[command.index("--evaluation-dtype") + 1] == "float64"
+    assert command[command.index("--linear-algebra-device") + 1] == "cuda"
+    manifest = json.loads((output / "launcher_manifest.json").read_text())
+    assert manifest["linear_algebra_device_override"] == "cuda"
+    assert manifest["effective_execution_profile"] == "gpu"
+    assert manifest["effective_linear_algebra_device"] == "cuda"
+
+
+def test_inventory_applies_fingerprint_neutral_gpu_linalg_override(monkeypatch):
+    config = load_config(
+        ROOT / "configs" / "pinn-failure-grid.float32-checkpoint-compatibility.json"
+    )
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 4)
+
+    inventory = runtime_inventory(
+        config,
+        evaluation_dtype="float64",
+        linear_algebra_device="cuda",
+    )
+
+    assert inventory["execution_profile"] == "gpu"
+    assert inventory["autodiff"] == {"device": "cuda", "dtype": "float64"}
+    assert inventory["linear_algebra"] == {
+        "device": "cuda",
+        "dtype": "float64",
+    }
 
 
 def test_workers_per_gpu_is_a_hard_concurrency_limit(tmp_path, monkeypatch):

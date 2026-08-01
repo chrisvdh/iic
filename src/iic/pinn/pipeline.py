@@ -624,6 +624,10 @@ def run_pipeline(
     stage_status["active_source_fingerprint"] = current_source["fingerprint"]
     stage_status["force_evaluation"] = force_evaluation
     stage_status["effective_evaluation_dtype"] = config.evaluation.dtype
+    stage_status["effective_linear_algebra_device"] = (
+        config.evaluation.linear_algebra_device
+    )
+    stage_status["effective_execution_profile"] = config.evaluation.profile
     _atomic_json(stage_status_path, stage_status)
 
     training_path = output_path / "training.json"

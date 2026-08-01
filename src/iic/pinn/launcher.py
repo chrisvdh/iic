@@ -19,7 +19,7 @@ import torch
 
 from iic.provenance import source_identity
 from iic.telemetry import ResourceMonitor, host_total_memory_bytes
-from .config import PinnRunConfig
+from .config import PinnRunConfig, apply_evaluation_runtime_overrides
 from .pipeline import _atomic_json
 
 
@@ -37,6 +37,7 @@ def launch_shards(
     cuda_devices: Optional[list[int]] = None,
     hessian_chunk_size: Optional[int] = None,
     evaluation_dtype: Optional[str] = None,
+    linear_algebra_device: Optional[str] = None,
     force_evaluation: bool = False,
     num_shards: Optional[int] = None,
     shard_indices: Optional[list[int]] = None,
@@ -47,6 +48,13 @@ def launch_shards(
     memory_reserve_fraction: float = 0.15,
 ) -> dict[str, Any]:
     """Launch isolated shard processes on fixed, capacity-limited slots."""
+
+    config = apply_evaluation_runtime_overrides(
+        config,
+        dtype=evaluation_dtype,
+        linear_algebra_device=linear_algebra_device,
+        hessian_chunk_size=hessian_chunk_size,
+    )
 
     requested_workers = (
         config.evaluation.workers if workers is None else workers
@@ -154,7 +162,7 @@ def launch_shards(
         )
 
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "stage": stage,
         "num_shards": shard_count,
         "selected_shards": selected_shards,
@@ -166,6 +174,12 @@ def launch_shards(
         "cpu_threads_per_worker": cpu_threads,
         "runtime_overrides_do_not_change_config_fingerprint": True,
         "evaluation_dtype_override": evaluation_dtype,
+        "linear_algebra_device_override": linear_algebra_device,
+        "effective_execution_profile": config.evaluation.profile,
+        "effective_evaluation_dtype": config.evaluation.dtype,
+        "effective_linear_algebra_device": (
+            config.evaluation.linear_algebra_device
+        ),
         "force_evaluation": force_evaluation,
         "cuda_visible_devices_inherited": os.environ.get(
             "CUDA_VISIBLE_DEVICES"
@@ -207,6 +221,10 @@ def launch_shards(
             command.extend(["--hessian-chunk-size", str(hessian_chunk_size)])
         if evaluation_dtype is not None:
             command.extend(["--evaluation-dtype", evaluation_dtype])
+        if linear_algebra_device is not None:
+            command.extend(
+                ["--linear-algebra-device", linear_algebra_device]
+            )
         if force_evaluation:
             command.append("--force-evaluation")
         environment = dict(os.environ)
@@ -378,11 +396,20 @@ def runtime_inventory(
     cpu_threads_per_worker: Optional[int] = None,
     cuda_devices: Optional[list[int]] = None,
     hessian_chunk_size: Optional[int] = None,
+    evaluation_dtype: Optional[str] = None,
+    linear_algebra_device: Optional[str] = None,
     measured_gpu_worker_peak_gib: Optional[float] = None,
     measured_host_worker_peak_gib: Optional[float] = None,
     memory_reserve_fraction: float = 0.15,
 ) -> dict[str, Any]:
     """Return a no-workload hardware and scheduling preflight."""
+
+    config = apply_evaluation_runtime_overrides(
+        config,
+        dtype=evaluation_dtype,
+        linear_algebra_device=linear_algebra_device,
+        hessian_chunk_size=hessian_chunk_size,
+    )
 
     visible = torch.cuda.device_count() if torch.cuda.is_available() else 0
     devices = _cuda_devices(
