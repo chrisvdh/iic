@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+import math
+from typing import Any, Optional
 
 import torch
 from torch import nn
 from torch.func import functional_call
 
-from iic.curvature import EvaluationProblem
+from iic.curvature import DiagonalLowRankHessian, EvaluationProblem
 from iic.parameters import (
     ParameterEntry,
     flatten_parameters,
@@ -35,6 +36,7 @@ class PinnFunctions:
     regularizer_fn: Any
     component_values_fn: Any
     metadata: dict[str, Any]
+    reference_hessian: Optional[DiagonalLowRankHessian] = None
 
 
 def build_functions(
@@ -55,6 +57,46 @@ def build_functions(
         device=theta.device,
         dtype=theta.dtype,
     )
+    reference_diagonal = torch.zeros_like(theta)
+    if config.regularizer.include_initialization:
+        reference_diagonal = reference_diagonal + precision
+    if config.training.weight_decay:
+        reference_diagonal = (
+            reference_diagonal + float(config.training.weight_decay)
+        )
+    reference_factors: list[torch.Tensor] = []
+    if config.regularizer.include_pde and float(rho) != 0.0:
+        output_bias = spec[-1]
+        if not output_bias.name.endswith(".bias") or (
+            output_bias.stop - output_bias.start
+        ) != 1:
+            raise ValueError("PINN output layer must have one scalar bias")
+        factor = torch.zeros_like(theta)
+        factor[output_bias.start] = math.sqrt(
+            2.0 * float(config.regularizer.pde_weight)
+        ) * abs(float(rho))
+        reference_factors.append(factor)
+    reference_hessian = None
+    if (
+        not config.regularizer.include_bea
+        and bool(torch.all(reference_diagonal > 0.0))
+    ):
+        factors = (
+            torch.stack(reference_factors)
+            if reference_factors
+            else theta.new_empty((0, theta.numel()))
+        )
+        reference_hessian = DiagonalLowRankHessian(
+            reference_point=torch.zeros_like(theta),
+            diagonal=reference_diagonal,
+            factors=factors,
+            provenance={
+                "kind": "pinn_zero_reference",
+                "diagonal": "initialization_precision_plus_weight_decay",
+                "low_rank": "pde_output_bias",
+                "update_rank": len(reference_factors),
+            },
+        )
 
     def values(candidate: torch.Tensor, coordinates: torch.Tensor) -> torch.Tensor:
         state = unflatten_parameters(candidate, spec)
@@ -239,6 +281,26 @@ def build_functions(
             if zero_reference_global_minimum_certified
             else None
         ),
+        "reference_hessian_structure": (
+            "diagonal_plus_pde_output_bias_rank_one"
+            if reference_hessian is not None and reference_factors
+            else "diagonal"
+            if reference_hessian is not None
+            else None
+        ),
+        "point_counts": {
+            "constraint": int(data.initial_coords.shape[0])
+            + (
+                int(data.boundary_lower.shape[0])
+                * (2 if float(nu) != 0.0 else 1)
+                if config.regularizer.boundary_role == "constraint"
+                else 0
+            ),
+            "initial_data": int(data.initial_coords.shape[0]),
+            "boundary": int(data.boundary_lower.shape[0]),
+            "pde_collocation": int(data.collocation_coords.shape[0]),
+            "prediction_grid": int(data.evaluation_coords.shape[0]),
+        },
         "data_fingerprint": data.fingerprint,
     }
     return PinnFunctions(
@@ -251,6 +313,7 @@ def build_functions(
         training_objective_fn=training_objective_fn,
         regularizer_fn=regularizer_fn,
         component_values_fn=component_values_fn,
+        reference_hessian=reference_hessian,
         metadata=metadata,
     )
 
@@ -266,6 +329,7 @@ def evaluation_problem(
         constraint_fn=functions.constraint_fn,
         regularizer_fn=functions.regularizer_fn,
         metadata=functions.metadata,
+        reference_hessian=functions.reference_hessian,
     )
 
 

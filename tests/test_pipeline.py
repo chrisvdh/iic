@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -345,6 +346,60 @@ def test_resume_reuses_checkpoint_and_retries_failed_evaluation(
     assert rows[0]["success"] is True
 
 
+def test_force_evaluation_replaces_success_without_retraining(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    _patch_training(monkeypatch)
+    calls = []
+
+    def fake_evaluate(*_args, **_kwargs):
+        calls.append(len(calls))
+        return {
+            "estimand_kind": "curvature_only",
+            "run_status": "success",
+            "hard_iic": None,
+            "soft_iic": None,
+            "interpolation_valid": False,
+            "evaluation_generation": len(calls),
+        }
+
+    monkeypatch.setattr(pipeline, "evaluate_curvature", fake_evaluate)
+    output = tmp_path / "forced"
+    pipeline.run_pipeline(config, output, curvature_only=True)
+
+    monkeypatch.setattr(
+        pipeline,
+        "train",
+        lambda *_args, **_kwargs: pytest.fail("forced evaluation must not retrain"),
+    )
+    pipeline.run_pipeline(
+        config,
+        output,
+        curvature_only=True,
+        resume=True,
+        force_evaluation=True,
+    )
+
+    rows = json.loads((output / "evaluation.json").read_text())
+    status = json.loads((output / "stage_status.json").read_text())
+    assert len(calls) == 2
+    assert rows[0]["evaluation_generation"] == 2
+    assert status["force_evaluation"] is True
+
+
+def test_pipeline_rejects_float32_derivative_evaluation(tmp_path):
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    config = replace(
+        config,
+        evaluation=replace(config.evaluation, dtype="float32"),
+    )
+
+    with pytest.raises(ValueError, match="native float64"):
+        pipeline.run_pipeline(config, tmp_path / "float32")
+
+
 def test_resume_rejects_changed_source_unless_explicitly_overridden(
     tmp_path,
     monkeypatch,
@@ -430,8 +485,18 @@ def test_unmocked_micro_pipeline_exercises_real_numerics(tmp_path):
     assert rows[0]["estimand_group"] == "nu_zero"
     assert rows[0]["regularizer_components_star"]["boundary"] >= 0.0
     assert rows[0]["hstar_factorization"]["backend"] in {
-        "cholesky",
-        "spectral_fallback",
+        "pivoted_lu",
+    }
+    assert rows[0]["h0_structured_reference_used"] is True
+    assert rows[0]["h0_factorization"]["backend"] == (
+        "analytic_diagonal_low_rank"
+    )
+    assert rows[0]["metadata"]["point_counts"] == {
+        "constraint": 4,
+        "initial_data": 4,
+        "boundary": 3,
+        "pde_collocation": 2,
+        "prediction_grid": 12,
     }
     assert rows[0]["reference_global_minimum_certified"] is True
     assert rows[0]["reference_solver"] == "analytic_certified_zero"

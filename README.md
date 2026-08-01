@@ -139,6 +139,13 @@ Periodic boundary values are structural information about the admissible
 function class rather than additional Bayesian observations, so their default
 role is an explicit regularizer.
 
+The experiment still uses points at the scale of thousands: the default grid
+has 256 initial-data points, 100 boundary samples, 1,000 PDE collocation
+points, and 25,600 points in the predictive evaluation grid. Only the first
+set contributes rows to $A_\star$ under the default decomposition. The other
+sets enter the regularizer or the external prediction-error diagnostic, as
+recorded by the `point_counts` metadata.
+
 Set `regularizer.boundary_role` to `constraint` to recover the alternative
 decomposition. In that mode the scaled periodic value residuals are appended
 to $h$, along with periodic derivative residuals when $\nu>0$. The resulting
@@ -217,17 +224,27 @@ The constraint kernel $K_H$ is always materialised as an $N\times N$
 matrix and its determinant is evaluated explicitly. Applying
 $H_\star^{-1}$ to the Jacobian right-hand sides can use a dense solve, an
 explicitly requested Moore--Penrose pseudoinverse, or matrix-free CG. The
-dense exact path attempts a Cholesky factorisation first and reuses it for both
-the log determinant and kernel solve. If Cholesky fails, the package computes
-the full spectrum, records the failure, and retains the existing signed or
-pseudodeterminant continuation where possible. It never turns that fallback
-into a positive-definite certification. CG stops and records nonpositive
+dense exact path uses one pivoted-LU factorisation for determinant values and
+all Jacobian right-hand-side solves. It does not run Cholesky or automatically
+eigendecompose the parameter-space Hessian. LU certifies positive definiteness
+only in the conservative no-row-pivot, positive-resolved-pivot case; otherwise
+definiteness is recorded as unverified while determinant sign,
+log-absolute-determinant, and solve residuals are retained. The small
+constraint kernels additionally receive full spectral diagnostics. Signed and
+pseudodeterminant continuations are retained where possible without being
+promoted to positive-definite certification. CG stops and records nonpositive
 curvature instead of treating an indefinite system as SPD.
+
+For the certified PINN reference $\theta_0=0$, $H_0$ is evaluated analytically
+as the He/weight-decay diagonal plus the PDE output-bias rank-one update. It is
+not materialised as a dense parameter-space Hessian. $H_\star$ remains a dense
+autodiff Hessian in the exact backend because residual-weighted nonlinear terms
+generally prevent the same reduction.
 
 The Hessian-volume gap has four backends:
 
-- `exact`: dense Hessians with Cholesky-first exact factors and spectral
-  diagnostics on fallback;
+- `exact`: dense $H_\star$ with pivoted-LU determinants and solves, plus the
+  analytic structured $H_0$ when its PINN zero-reference certificate applies;
 - `first_order`: $\mathrm{tr}[H_0^{-1}(H_\star-H_0)]$;
 - `path`: quadrature of the log-determinant derivative along the straight
   Hessian path from $H_0$ to $H_\star$;
@@ -511,11 +528,38 @@ iic pinn launch \
 ```
 
 The `cpu` profile keeps autodiff and linear algebra on CPU in float64. The
-`mixed` profile performs autodiff/HVP work on GPU and transfers explicit
-matrices to CPU float64 linear algebra. The `gpu` profile keeps both phases on
-GPU. Worker density is a machine calibration parameter, not a fixed
-two-process limit. Evaluation can use the same 845 shards with a lower
-`--workers` value without changing shard identity.
+`mixed` profile performs autodiff/HVP work natively in GPU float64 and
+transfers explicit matrices to CPU float64 linear algebra. The `gpu` profile
+keeps both phases in GPU float64. Dense exact evaluation rejects float32
+derivative construction; casting already-computed float32 arrays to float64 is
+not accepted as a substitute. Worker density is a machine calibration
+parameter, not a fixed two-process limit. Evaluation can use the same 845
+shards with a lower `--workers` value without changing shard identity.
+
+To recompute old checkpoint evaluations in native float64 without retraining,
+resume the same shards and explicitly replace successful evaluation rows:
+
+```bash
+iic pinn launch \
+  --config configs/pinn-failure-grid.float32-checkpoint-compatibility.json \
+  --output runs/pinn-failure-grid \
+  --stage evaluation \
+  --resume \
+  --force-evaluation \
+  --evaluation-dtype float64 \
+  --allow-source-mismatch \
+  --num-shards 845 \
+  --workers 4 \
+  --cuda-devices 0 1 2 3
+```
+
+`--allow-source-mismatch` is needed only when the checkpoints were written by
+an earlier reviewed source revision. Checkpoint parameters are loaded into a
+float64 model before any constraint Jacobian or Hessian is differentiated.
+The compatibility config preserves the original checkpoint fingerprint; the
+runtime `--evaluation-dtype` override deliberately does not alter it. New
+training runs should use `configs/pinn-failure-grid.example.json`, whose native
+evaluation dtype is already float64.
 
 The launcher records completed results atomically as each process exits. On
 `SIGINT` or `SIGTERM`, it stops dispatching new shards, lets already isolated

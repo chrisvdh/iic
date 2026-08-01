@@ -37,6 +37,16 @@ def _dtype(name: str) -> torch.dtype:
     return torch.float64 if name == "float64" else torch.float32
 
 
+def _validate_iic_precision(config: PinnRunConfig) -> None:
+    if config.evaluation.dtype != "float64":
+        raise ValueError(
+            "PINN Jacobian and Hessian evaluation requires native float64; "
+            "pass --evaluation-dtype float64"
+        )
+    if config.evaluation.linear_algebra_dtype != "float64":
+        raise ValueError("PINN IIC linear algebra requires float64")
+
+
 def _evaluation_options(config: PinnRunConfig) -> EvaluationOptions:
     value = config.evaluation
     return EvaluationOptions(
@@ -519,11 +529,14 @@ def run_pipeline(
     shard_index: int = 0,
     stage: str = "both",
     allow_source_mismatch: bool = False,
+    force_evaluation: bool = False,
 ) -> dict[str, Any]:
     """Train and evaluate a shard, retaining every successful checkpoint."""
 
     if stage not in {"training", "evaluation", "both"}:
         raise ValueError("stage must be training, evaluation, or both")
+    if stage != "training":
+        _validate_iic_precision(config)
     output_path = Path(output)
     specs = _run_specs(
         config,
@@ -537,6 +550,8 @@ def run_pipeline(
     )
     current_source = source_identity()
     reuse_training = resume or stage == "evaluation"
+    if force_evaluation and not reuse_training:
+        raise ValueError("force_evaluation requires resumed training checkpoints")
     if reuse_training:
         if not output_path.is_dir():
             raise FileNotFoundError(
@@ -607,6 +622,8 @@ def run_pipeline(
         and allow_source_mismatch
     ) if reuse_training else False
     stage_status["active_source_fingerprint"] = current_source["fingerprint"]
+    stage_status["force_evaluation"] = force_evaluation
+    stage_status["effective_evaluation_dtype"] = config.evaluation.dtype
     _atomic_json(stage_status_path, stage_status)
 
     training_path = output_path / "training.json"
@@ -826,7 +843,11 @@ def run_pipeline(
             continue
         run_id = str(training_row["run_id"])
         existing = evaluation_by_id.get(run_id)
-        if existing is not None and existing.get("success") is True:
+        if (
+            existing is not None
+            and existing.get("success") is True
+            and not force_evaluation
+        ):
             if existing.get("estimand_kind") != evaluation_mode:
                 raise ValueError("existing evaluation mode does not match")
             continue

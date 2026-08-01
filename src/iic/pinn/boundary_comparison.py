@@ -24,6 +24,7 @@ from .pipeline import (
     _evaluation_options,
     _load_parameters,
     _run_specs,
+    _validate_iic_precision,
     run_pipeline,
 )
 from .problem import build_functions, evaluation_problem
@@ -92,6 +93,7 @@ def run_boundary_role_comparison(
 ) -> dict[str, Any]:
     """Train once, then evaluate the same checkpoint under both boundary roles."""
 
+    _validate_iic_precision(config)
     output_path = Path(output)
     training_output = output_path / "training"
     if not resume and output_path.exists() and (

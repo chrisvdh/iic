@@ -88,6 +88,26 @@ def test_default_constraint_contains_only_initial_data():
     )
     assert zero.metadata["nu_zero_policy"] == "no_periodic_derivative_matching"
     assert nonzero.metadata["nu_zero_policy"] == "periodic_derivative_matching"
+    assert nonzero.metadata["point_counts"] == {
+        "constraint": data_nonzero.initial_coords.shape[0],
+        "initial_data": data_nonzero.initial_coords.shape[0],
+        "boundary": data_nonzero.boundary_lower.shape[0],
+        "pde_collocation": data_nonzero.collocation_coords.shape[0],
+        "prediction_grid": data_nonzero.evaluation_coords.shape[0],
+    }
+
+
+def test_zero_reference_hessian_structure_matches_autograd():
+    _config, _data, functions = _setup(0.5)
+    structure = functions.reference_hessian
+    assert structure is not None
+
+    theta0 = torch.zeros_like(functions.theta)
+    expected = torch.func.hessian(functions.regularizer_fn)(theta0)
+    actual = torch.diag(structure.diagonal) + structure.factors.T @ structure.factors
+
+    torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
+    assert structure.factors.shape == (1, theta0.numel())
 
 
 def test_boundary_constraint_mode_preserves_training_objective():
@@ -120,3 +140,4 @@ def test_bea_stress_configuration_adds_optimizer_regularizer():
     assert functions.metadata["bea_objective"] == (
         "actual_full_batch_training_objective"
     )
+    assert functions.reference_hessian is None

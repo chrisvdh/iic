@@ -36,6 +36,8 @@ def launch_shards(
     cpu_threads_per_worker: Optional[int] = None,
     cuda_devices: Optional[list[int]] = None,
     hessian_chunk_size: Optional[int] = None,
+    evaluation_dtype: Optional[str] = None,
+    force_evaluation: bool = False,
     num_shards: Optional[int] = None,
     shard_indices: Optional[list[int]] = None,
     allow_source_mismatch: bool = False,
@@ -88,6 +90,19 @@ def launch_shards(
         raise ValueError(
             "shard_indices must be distinct values in [0, num_shards)"
         )
+    if force_evaluation and not resume:
+        raise ValueError("force_evaluation requires resume")
+    if force_evaluation:
+        missing = [
+            index
+            for index in selected_shards
+            if not (output / f"shard-{index:04d}").is_dir()
+        ]
+        if missing:
+            raise FileNotFoundError(
+                "force_evaluation requires existing shard directories: "
+                + ", ".join(str(index) for index in missing)
+            )
 
     output.mkdir(parents=True, exist_ok=resume)
     cuda_required = _cuda_required(config)
@@ -150,6 +165,8 @@ def launch_shards(
         "effective_workers_per_gpu": effective_gpu_density,
         "cpu_threads_per_worker": cpu_threads,
         "runtime_overrides_do_not_change_config_fingerprint": True,
+        "evaluation_dtype_override": evaluation_dtype,
+        "force_evaluation": force_evaluation,
         "cuda_visible_devices_inherited": os.environ.get(
             "CUDA_VISIBLE_DEVICES"
         ),
@@ -188,6 +205,10 @@ def launch_shards(
             command.append("--curvature-only")
         if hessian_chunk_size is not None:
             command.extend(["--hessian-chunk-size", str(hessian_chunk_size)])
+        if evaluation_dtype is not None:
+            command.extend(["--evaluation-dtype", evaluation_dtype])
+        if force_evaluation:
+            command.append("--force-evaluation")
         environment = dict(os.environ)
         threads = str(cpu_threads)
         environment["OMP_NUM_THREADS"] = threads

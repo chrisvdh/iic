@@ -54,7 +54,7 @@
     "mode": "full_iic",
     "profile": "mixed",
     "device": "cuda",
-    "dtype": "float64",
+    "dtype": "float32",
     "linear_algebra_device": "cpu",
     "linear_algebra_dtype": "float64",
     "hessian_backend": "dense",

@@ -47,6 +47,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Skip theta0/H0 and compute only the curvature ablation.",
     )
     run.add_argument("--hessian-chunk-size", type=int)
+    run.add_argument("--evaluation-dtype", choices=("float32", "float64"))
+    run.add_argument(
+        "--force-evaluation",
+        action="store_true",
+        help="Recompute evaluation rows while reusing validated checkpoints.",
+    )
     compare_boundary = actions.add_parser(
         "compare-boundary-roles",
         help="Train once and compare both boundary decompositions.",
@@ -59,6 +65,9 @@ def _parser() -> argparse.ArgumentParser:
     compare_boundary.add_argument("--num-shards", type=int, default=1)
     compare_boundary.add_argument("--shard-index", type=int, default=0)
     compare_boundary.add_argument("--hessian-chunk-size", type=int)
+    compare_boundary.add_argument(
+        "--evaluation-dtype", choices=("float32", "float64")
+    )
     launch = actions.add_parser(
         "launch",
         help="Launch independent local shards with calibrated worker mapping.",
@@ -80,6 +89,8 @@ def _parser() -> argparse.ArgumentParser:
     launch.add_argument("--cpu-threads-per-worker", type=int)
     launch.add_argument("--cuda-devices", type=int, nargs="+")
     launch.add_argument("--hessian-chunk-size", type=int)
+    launch.add_argument("--evaluation-dtype", choices=("float32", "float64"))
+    launch.add_argument("--force-evaluation", action="store_true")
     launch.add_argument("--telemetry-interval-seconds", type=float, default=5.0)
     launch.add_argument("--measured-gpu-worker-peak-gib", type=float)
     launch.add_argument("--measured-host-worker-peak-gib", type=float)
@@ -105,6 +116,8 @@ def _parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--cpu-threads-per-worker", type=int)
     calibrate.add_argument("--cuda-devices", type=int, nargs="+")
     calibrate.add_argument("--hessian-chunk-size", type=int)
+    calibrate.add_argument("--evaluation-dtype", choices=("float32", "float64"))
+    calibrate.add_argument("--force-evaluation", action="store_true")
     calibrate.add_argument(
         "--telemetry-interval-seconds", type=float, default=2.0
     )
@@ -178,6 +191,8 @@ def main() -> None:
                 cpu_threads_per_worker=args.cpu_threads_per_worker,
                 cuda_devices=args.cuda_devices,
                 hessian_chunk_size=args.hessian_chunk_size,
+                evaluation_dtype=args.evaluation_dtype,
+                force_evaluation=args.force_evaluation,
                 num_shards=args.num_shards,
                 shard_indices=args.shard_indices,
                 allow_source_mismatch=args.allow_source_mismatch,
@@ -277,6 +292,14 @@ def main() -> None:
                         hessian_chunk_size=args.hessian_chunk_size,
                     ),
                 )
+            if args.evaluation_dtype is not None:
+                config = replace(
+                    config,
+                    evaluation=replace(
+                        config.evaluation,
+                        dtype=args.evaluation_dtype,
+                    ),
+                )
             if args.dry_run:
                 result = {
                     **validate_plan(
@@ -313,6 +336,14 @@ def main() -> None:
                         hessian_chunk_size=args.hessian_chunk_size,
                     ),
                 )
+            if args.evaluation_dtype is not None:
+                config = replace(
+                    config,
+                    evaluation=replace(
+                        config.evaluation,
+                        dtype=args.evaluation_dtype,
+                    ),
+                )
             if args.dry_run:
                 result = validate_plan(
                     config,
@@ -331,6 +362,7 @@ def main() -> None:
                     shard_index=args.shard_index,
                     stage=args.stage,
                     allow_source_mismatch=args.allow_source_mismatch,
+                    force_evaluation=args.force_evaluation,
                 )
     else:
         from .grokking.config import load_config as load_grokking_config

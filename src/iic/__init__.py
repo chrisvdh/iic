@@ -3,6 +3,7 @@
 from ._version import __version__
 from .curvature import (
     CurvatureProblem,
+    DiagonalLowRankHessian,
     EvaluationOptions,
     EvaluationProblem,
     evaluate_curvature,
@@ -15,6 +16,7 @@ from .operator_kernel import assemble_operator_kernel
 
 __all__ = [
     "CurvatureProblem",
+    "DiagonalLowRankHessian",
     "EvaluationProblem",
     "EvaluationOptions",
     "ReferencePoint",

@@ -146,6 +146,34 @@ def test_pilot_uses_the_bea_free_baseline():
     assert config.evaluation.dtype == "float64"
 
 
+def test_failure_grid_checkpoint_compatibility_changes_only_eval_dtype():
+    current = load_config(
+        ROOT / "configs" / "pinn-failure-grid.example.json"
+    )
+    compatibility = load_config(
+        ROOT
+        / "configs"
+        / "pinn-failure-grid.float32-checkpoint-compatibility.json"
+    )
+    current_non_evaluation = {
+        key: value for key, value in current.raw.items() if key != "evaluation"
+    }
+    compatibility_non_evaluation = {
+        key: value
+        for key, value in compatibility.raw.items()
+        if key != "evaluation"
+    }
+
+    assert current_non_evaluation == compatibility_non_evaluation
+    assert current.evaluation.dtype == "float64"
+    assert compatibility.evaluation.dtype == "float32"
+    current_evaluation = dict(current.raw["evaluation"])
+    compatibility_evaluation = dict(compatibility.raw["evaluation"])
+    current_evaluation.pop("dtype")
+    compatibility_evaluation.pop("dtype")
+    assert current_evaluation == compatibility_evaluation
+
+
 def test_bea_defaults_to_disabled(tmp_path):
     raw = json.loads((ROOT / "configs" / "pinn-smoke.json").read_text())
     del raw["regularizer"]["include_bea"]

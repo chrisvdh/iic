@@ -16,7 +16,17 @@ from .telemetry import PhaseTimer, peak_memory_record, reset_cuda_peak_memory
 from .volume import VolumeOptions, conjugate_gradient, estimate_logdet_ratio
 
 TensorFn = Callable[[torch.Tensor], torch.Tensor]
-IIC_EVALUATION_SCHEMA_VERSION = 3
+IIC_EVALUATION_SCHEMA_VERSION = 5
+
+
+@dataclass(frozen=True)
+class DiagonalLowRankHessian:
+    """Certified Hessian ``diag(diagonal) + factors.T @ factors`` at a point."""
+
+    reference_point: torch.Tensor
+    diagonal: torch.Tensor
+    factors: torch.Tensor
+    provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -27,6 +37,7 @@ class EvaluationProblem:
     constraint_fn: TensorFn
     regularizer_fn: TensorFn
     metadata: dict[str, Any] = field(default_factory=dict)
+    reference_hessian: Optional[DiagonalLowRankHessian] = None
 
 
 CurvatureProblem = EvaluationProblem
@@ -45,6 +56,12 @@ class EvaluationOptions:
     compute_direct_iic: bool = False
     reset_peak_memory: bool = True
     volume: VolumeOptions = field(default_factory=VolumeOptions)
+
+
+@dataclass(frozen=True)
+class _DenseLUFactor:
+    lu: torch.Tensor
+    pivots: torch.Tensor
 
 
 def _torch_dtype(name: str) -> torch.dtype:
@@ -135,55 +152,230 @@ def _spectral_summary(
 def _factorize_dense(
     matrix: torch.Tensor,
     tolerance: float,
-) -> tuple[dict[str, Any], Optional[torch.Tensor], dict[str, Any]]:
-    """Use Cholesky for the SPD path and spectra only for its fallback."""
+    *,
+    compute_residuals: bool = False,
+    compute_spectrum: bool = False,
+) -> tuple[dict[str, Any], Optional[_DenseLUFactor], dict[str, Any]]:
+    """Use pivoted LU for determinant values, solves, and limited diagnostics."""
 
     symmetric = 0.5 * (matrix + matrix.T)
-    factor, info = torch.linalg.cholesky_ex(symmetric, check_errors=False)
-    cholesky_succeeded = int(info.max().item()) == 0
-    if cholesky_succeeded:
-        logdet = float(
-            (2.0 * torch.log(torch.diagonal(factor)).sum()).detach()
+    lu, pivots, lu_info_tensor = torch.linalg.lu_factor_ex(
+        symmetric,
+        check_errors=False,
+    )
+    lu_info = int(lu_info_tensor.max().item())
+    diagonal = torch.diagonal(lu)
+    nonsingular = (
+        lu_info == 0
+        and bool(torch.all(torch.isfinite(diagonal)))
+        and bool(torch.all(diagonal != 0.0))
+    )
+    swap_count = int(
+        (
+            pivots
+            != torch.arange(
+                1,
+                pivots.numel() + 1,
+                device=pivots.device,
+                dtype=pivots.dtype,
+            )
+        ).sum()
+    )
+    determinant_sign = 0
+    logabsdet = None
+    if nonsingular:
+        permutation_sign = -1 if swap_count % 2 else 1
+        determinant_sign = permutation_sign * int(
+            torch.prod(torch.sign(diagonal)).item()
         )
-        size = matrix.shape[0]
-        summary = {
-            "status": "positive_definite",
-            "positive_definite_verified": True,
-            "min_eigenvalue": None,
-            "max_eigenvalue": None,
-            "num_negative": 0,
-            "num_near_zero": 0,
-            "num_nonpositive": 0,
-            "determinant_sign": 1,
-            "logdet": logdet,
-            "logabsdet": logdet,
-            "pseudo_logabsdet": logdet,
-            "pseudo_rank": size,
-            "nonsingular_verified": True,
-            "resolution": {
-                "analysis_floor": float(tolerance),
-                "roundoff_scale": None,
-                "spectral_scale": None,
-                "machine_epsilon": float(torch.finfo(matrix.dtype).eps),
-                "positive_under_analysis_floor": True,
-                "positive_sign_resolved": True,
-                "rule": "positive definiteness verified by Cholesky",
-            },
-            "eigenvalues": None,
-        }
-        return summary, factor, {
-            "backend": "cholesky",
-            "cholesky_succeeded": True,
-            "spectral_fallback_used": False,
-        }
-    summary = _spectral_summary(symmetric, tolerance)
-    return summary, None, {
-        "backend": "spectral_fallback",
-        "cholesky_succeeded": False,
-        "cholesky_info": int(info.max().item()),
-        "spectral_fallback_used": True,
-        "fallback_reason": "matrix_not_numerically_positive_definite",
+        logabsdet = float(torch.log(torch.abs(diagonal)).sum().detach())
+    matrix_scale = float(torch.max(torch.abs(symmetric)).detach())
+    upper_scale = float(torch.max(torch.abs(torch.triu(lu))).detach())
+    pivot_growth = (
+        upper_scale / matrix_scale if matrix_scale > 0.0 else None
+    )
+    roundoff_scale = float(torch.finfo(matrix.dtype).eps) * matrix_scale
+    pivot_resolution = max(float(tolerance), roundoff_scale)
+    no_row_swaps = swap_count == 0
+    positive_definite_certified_by_lu = bool(
+        nonsingular
+        and no_row_swaps
+        and torch.all(diagonal > pivot_resolution)
+    )
+    lu_record = {
+        "backend": "pivoted_lu",
+        "lu_info": lu_info,
+        "determinant_sign": determinant_sign,
+        "logabsdet": logabsdet,
+        "swap_count": swap_count,
+        "minimum_abs_u_pivot": float(torch.min(torch.abs(diagonal)).detach()),
+        "maximum_abs_u_pivot": float(torch.max(torch.abs(diagonal)).detach()),
+        "pivot_growth": pivot_growth,
+        "roundoff_scale": roundoff_scale,
+        "pivot_resolution": pivot_resolution,
+        "no_row_swaps": no_row_swaps,
+        "positive_definite_certified_by_lu": (
+            positive_definite_certified_by_lu
+        ),
+        "spectrum_computed": compute_spectrum,
     }
+
+    if compute_spectrum:
+        summary = _spectral_summary(
+            symmetric,
+            tolerance,
+            compute_residuals=compute_residuals,
+        )
+        summary["determinant_sign"] = determinant_sign
+        summary["logabsdet"] = logabsdet
+        summary["logdet"] = logabsdet if determinant_sign > 0 else None
+        return summary, (
+            _DenseLUFactor(lu, pivots) if nonsingular else None
+        ), {
+            **lu_record,
+            "definiteness_backend": "spectral",
+        }
+    size = matrix.shape[0]
+    status = (
+        "positive_definite"
+        if positive_definite_certified_by_lu
+        else "nonsingular_definiteness_unverified"
+        if nonsingular
+        else "singular"
+    )
+    summary = {
+        "status": status,
+        "positive_under_analysis_floor": positive_definite_certified_by_lu,
+        "positive_definite_verified": positive_definite_certified_by_lu,
+        "min_eigenvalue": None,
+        "max_eigenvalue": None,
+        "num_negative": None,
+        "num_near_zero": None,
+        "num_nonpositive": None,
+        "determinant_sign": determinant_sign,
+        "logdet": logabsdet if determinant_sign > 0 else None,
+        "logabsdet": logabsdet,
+        "pseudo_logabsdet": logabsdet if nonsingular else None,
+        "pseudo_rank": size if nonsingular else None,
+        "nonsingular_under_analysis_floor": None,
+        "nonsingular_verified": nonsingular,
+        "resolution": {
+            "analysis_floor": float(tolerance),
+            "roundoff_scale": roundoff_scale,
+            "spectral_scale": matrix_scale,
+            "machine_epsilon": float(torch.finfo(matrix.dtype).eps),
+            "positive_under_analysis_floor": (
+                positive_definite_certified_by_lu
+            ),
+            "positive_sign_resolved": positive_definite_certified_by_lu,
+            "nonzero_numerically_resolved": nonsingular,
+            "minimum_abs_u_pivot": float(
+                torch.min(torch.abs(diagonal)).detach()
+            ),
+            "rule": (
+                "positive definiteness is certified only when pivoted LU "
+                "performs no row swaps and all unpivoted pivots are "
+                "positive above the recorded resolution; otherwise "
+                "definiteness is unverified"
+            ),
+        },
+        "eigenvalues": None,
+    }
+    return summary, (
+        _DenseLUFactor(lu, pivots) if nonsingular else None
+    ), {
+        **lu_record,
+        "definiteness_backend": (
+            "lu_sylvester_no_row_pivot"
+            if positive_definite_certified_by_lu
+            else "not_certified"
+        ),
+    }
+
+
+def _structured_hessian(
+    structure: DiagonalLowRankHessian,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    numerical_jitter: float,
+    tolerance: float,
+) -> tuple[Callable[[torch.Tensor], torch.Tensor], dict[str, Any], dict[str, Any]]:
+    """Prepare an exact diagonal-plus-low-rank Hessian without materialising it."""
+
+    diagonal = structure.diagonal.detach().to(device=device, dtype=dtype)
+    factors = structure.factors.detach().to(device=device, dtype=dtype)
+    if diagonal.ndim != 1:
+        raise ValueError("structured Hessian diagonal must be one-dimensional")
+    if factors.ndim != 2 or factors.shape[1] != diagonal.numel():
+        raise ValueError("structured Hessian factors must have shape (rank, p)")
+    if numerical_jitter:
+        diagonal = diagonal + float(numerical_jitter)
+    if not bool(torch.all(torch.isfinite(diagonal))) or not bool(
+        torch.all(diagonal > 0.0)
+    ):
+        raise ValueError("structured Hessian requires a finite positive diagonal")
+    if not bool(torch.all(torch.isfinite(factors))):
+        raise ValueError("structured Hessian factors must be finite")
+
+    if factors.shape[0]:
+        core = torch.eye(factors.shape[0], device=device, dtype=dtype)
+        core = core + (factors / diagonal.unsqueeze(0)) @ factors.T
+        core_sign, core_logabsdet = torch.linalg.slogdet(core)
+        if float(core_sign) <= 0.0:
+            raise RuntimeError("positive low-rank update produced an invalid core")
+        update_logdet = float(core_logabsdet.detach())
+    else:
+        update_logdet = 0.0
+    logdet = float(torch.log(diagonal).sum().detach()) + update_logdet
+
+    def matvec(vector: torch.Tensor) -> torch.Tensor:
+        result = diagonal * vector
+        if factors.shape[0]:
+            result = result + factors.T @ (factors @ vector)
+        return result
+
+    scale = float(
+        torch.max(diagonal).detach()
+        + (torch.linalg.matrix_norm(factors, ord=2).square().detach()
+           if factors.shape[0] else 0.0)
+    )
+    summary = {
+        "status": "positive_definite",
+        "positive_under_analysis_floor": True,
+        "positive_definite_verified": True,
+        "min_eigenvalue": None,
+        "max_eigenvalue": None,
+        "num_negative": 0,
+        "num_near_zero": 0,
+        "num_nonpositive": 0,
+        "determinant_sign": 1,
+        "logdet": logdet,
+        "logabsdet": logdet,
+        "pseudo_logabsdet": logdet,
+        "pseudo_rank": diagonal.numel(),
+        "nonsingular_verified": True,
+        "resolution": {
+            "analysis_floor": float(tolerance),
+            "roundoff_scale": float(torch.finfo(dtype).eps) * scale,
+            "spectral_scale": scale,
+            "machine_epsilon": float(torch.finfo(dtype).eps),
+            "positive_under_analysis_floor": True,
+            "positive_sign_resolved": True,
+            "minimum_diagonal_lower_bound": float(torch.min(diagonal).detach()),
+            "rule": "positive diagonal plus positive-semidefinite low-rank update",
+        },
+        "eigenvalues": None,
+    }
+    factorization = {
+        "backend": "analytic_diagonal_low_rank",
+        "diagonal_size": diagonal.numel(),
+        "update_rank": factors.shape[0],
+        "determinant_sign": 1,
+        "logabsdet": logdet,
+        "provenance": dict(structure.provenance),
+    }
+    return matvec, summary, factorization
 
 
 def estimate_dense_bytes(
@@ -284,7 +476,7 @@ def _solve_kernel(
     a_star: torch.Tensor,
     *,
     hstar: Optional[torch.Tensor],
-    hstar_cholesky: Optional[torch.Tensor],
+    hstar_lu: Optional[_DenseLUFactor],
     hstar_matvec: Callable[[torch.Tensor], torch.Tensor],
     options: EvaluationOptions,
 ) -> tuple[Optional[torch.Tensor], dict[str, Any]]:
@@ -306,17 +498,15 @@ def _solve_kernel(
     if options.inverse_backend == "solve":
         if hstar is None:
             raise ValueError("dense solve requires an explicit Hessian")
-        solved = (
-            torch.cholesky_solve(a_star.T, hstar_cholesky)
-            if hstar_cholesky is not None
-            else torch.linalg.solve(hstar, a_star.T)
+        if hstar_lu is None:
+            raise torch.linalg.LinAlgError("dense Hessian LU factor is singular")
+        solved = torch.linalg.lu_solve(
+            hstar_lu.lu,
+            hstar_lu.pivots,
+            a_star.T,
         )
         return a_star @ solved, {
-            "backend": (
-                "cholesky_solve"
-                if hstar_cholesky is not None
-                else "solve"
-            ),
+            "backend": "pivoted_lu_solve",
             "available": True,
             **dense_residual_record(solved),
             "column_records": [],
@@ -422,11 +612,10 @@ def _build_star(
         return product.to(device=la_device, dtype=la_dtype).detach()
 
     hstar: Optional[torch.Tensor] = None
-    hstar_cholesky: Optional[torch.Tensor] = None
+    hstar_lu: Optional[_DenseLUFactor] = None
     h_factorization = {
         "backend": "not_explicitly_evaluated",
-        "cholesky_succeeded": False,
-        "spectral_fallback_used": False,
+        "definiteness_backend": "not_evaluated",
     }
     if options.hessian_backend == "dense":
         with timer.phase("hstar_construction", theta.device, la_device):
@@ -444,7 +633,7 @@ def _build_star(
                 )
         hstar_matvec = lambda vector: hstar @ vector
         with timer.phase("hstar_factorization", la_device):
-            h_summary, hstar_cholesky, h_factorization = _factorize_dense(
+            h_summary, hstar_lu, h_factorization = _factorize_dense(
                 hstar,
                 tolerance,
             )
@@ -467,26 +656,29 @@ def _build_star(
         kernel, inverse = _solve_kernel(
             a_star,
             hstar=hstar,
-            hstar_cholesky=hstar_cholesky,
+            hstar_lu=hstar_lu,
             hstar_matvec=hstar_matvec,
             options=options,
         )
     kernel_summary = None
+    kernel_factorization = None
     if kernel is not None:
         with timer.phase("constraint_kernel_spectral", la_device):
             kernel = 0.5 * (kernel + kernel.T)
-            kernel_summary = _spectral_summary(
+            kernel_summary, _, kernel_factorization = _factorize_dense(
                 kernel,
                 tolerance,
                 compute_residuals=True,
+                compute_spectrum=True,
             )
     with timer.phase("constraint_jacobian_spectral", la_device):
         gram = a_star @ a_star.T
         sharpness = 0.5 * (gram + gram.T)
-        sharpness_summary = _spectral_summary(
+        sharpness_summary, _, sharpness_factorization = _factorize_dense(
             sharpness,
             tolerance,
             compute_residuals=True,
+            compute_spectrum=True,
         )
         singular_values = torch.linalg.svdvals(a_star).detach()
     rank_resolution = spectral_resolution(
@@ -501,12 +693,14 @@ def _build_star(
         "hstar": hstar,
         "hstar_matvec": hstar_matvec,
         "hstar_summary": h_summary,
-        "hstar_cholesky": hstar_cholesky,
+        "hstar_lu": hstar_lu,
         "hstar_factorization": h_factorization,
         "kernel": kernel,
         "kernel_summary": kernel_summary,
+        "kernel_factorization": kernel_factorization,
         "inverse": inverse,
         "sharpness_summary": sharpness_summary,
+        "sharpness_factorization": sharpness_factorization,
         "rank": rank,
         "full_row_rank": rank == a_star.shape[0],
         "sigma_min": float(singular_values.min()),
@@ -599,6 +793,7 @@ def _base_record(
         "kernel_spectral_resolution": (
             k["resolution"] if k is not None else None
         ),
+        "kernel_factorization": star["kernel_factorization"],
         "hard_curvature": hard_curvature,
         "hard_curvature_signed_logabs": hard_signed,
         "hard_curvature_pseudo": hard_pseudo,
@@ -626,6 +821,7 @@ def _base_record(
         "sharpness_pseudo": sharp["pseudo_logabsdet"] / n,
         "sharpness_certified": sharp["positive_definite_verified"],
         "sharpness_spectral_resolution": sharp["resolution"],
+        "sharpness_factorization": star["sharpness_factorization"],
         "spectral_absolute_floor": float(tolerance),
         "dataset_correction": -math.log(n),
         "regularizer_gap": None,
@@ -653,10 +849,11 @@ def _base_record(
             dtype=star["la_dtype"],
         )
         for rho in rhos:
-            shifted_summary = _spectral_summary(
+            shifted_summary, _, shifted_factorization = _factorize_dense(
                 star["kernel"] + identity / float(rho),
                 tolerance,
                 compute_residuals=True,
+                compute_spectrum=True,
             )
             finite[f"{float(rho):g}"] = {
                 "rho": float(rho),
@@ -671,6 +868,7 @@ def _base_record(
                 "pseudo_value": shifted_summary["pseudo_logabsdet"] / n,
                 "shifted_definiteness": shifted_summary["status"],
                 "determinant_sign": shifted_summary["determinant_sign"],
+                "factorization": shifted_factorization,
                 "spectral_resolution": shifted_summary["resolution"],
                 "algebraically_valid": shifted_summary[
                     "positive_under_analysis_floor"
@@ -758,13 +956,24 @@ def evaluate_iic(
             problem.theta_star.device,
             options.linear_algebra_device,
         )
+    structured_reference = problem.reference_hessian
+    use_structured_reference = False
+    if structured_reference is not None:
+        expected_reference = structured_reference.reference_point.detach().to(
+            device=reference.theta0.device,
+            dtype=reference.theta0.dtype,
+        )
+        use_structured_reference = bool(
+            expected_reference.shape == reference.theta0.shape
+            and torch.equal(expected_reference, reference.theta0.detach())
+        )
     try:
         star = _build_star(
             problem,
             tolerance=tolerance,
             max_memory_bytes=max_memory_bytes,
             options=options,
-            hessian_count=2,
+            hessian_count=1 if use_structured_reference else 2,
             timer=timer,
         )
     except torch.linalg.LinAlgError as error:
@@ -804,10 +1013,20 @@ def evaluate_iic(
     h0: Optional[torch.Tensor] = None
     h0_factorization = {
         "backend": "not_explicitly_evaluated",
-        "cholesky_succeeded": False,
-        "spectral_fallback_used": False,
+        "definiteness_backend": "not_evaluated",
     }
-    if options.hessian_backend == "dense":
+    if use_structured_reference:
+        if structured_reference is None:
+            raise RuntimeError("structured reference state was lost")
+        with timer.phase("h0_construction", star["la_device"]):
+            h0_matvec, h0_summary, h0_factorization = _structured_hessian(
+                structured_reference,
+                device=star["la_device"],
+                dtype=star["la_dtype"],
+                numerical_jitter=options.numerical_jitter,
+                tolerance=tolerance,
+            )
+    elif options.hessian_backend == "dense":
         with timer.phase(
             "h0_construction",
             theta0_native.device,
@@ -869,7 +1088,8 @@ def evaluate_iic(
                 "available": True,
                 "solver_failures": 0,
                 "factorizations_reused": True,
-                "spectra_reused": True,
+                "determinant_values_reused": True,
+                "spectra_reused": False,
             }
         else:
             volume = estimate_logdet_ratio(
@@ -1069,6 +1289,7 @@ def evaluate_iic(
             ],
             "h0_spectral_resolution": h0_summary.get("resolution"),
             "h0_factorization": h0_factorization,
+            "h0_structured_reference_used": use_structured_reference,
             "logdet_H0": h0_summary.get("logdet"),
             "logabsdet_H0": h0_summary.get("logabsdet"),
             "pseudo_logabsdet_H0": h0_summary.get("pseudo_logabsdet"),
@@ -1182,9 +1403,11 @@ def _direct_iic(
             "logdet": 0.0,
             "resolution": None,
         }
+        tangent_factorization = {"backend": "empty_tangent_space"}
     else:
-        tangent_summary = _spectral_summary(
-            tangent_basis.T @ star["hstar"] @ tangent_basis, tolerance
+        tangent_summary, _, tangent_factorization = _factorize_dense(
+            tangent_basis.T @ star["hstar"] @ tangent_basis,
+            tolerance,
         )
     sharp = star["sharpness_summary"]
     available = bool(
@@ -1213,6 +1436,7 @@ def _direct_iic(
         "tangent_hessian_spectral_resolution": tangent_summary.get(
             "resolution"
         ),
+        "tangent_hessian_factorization": tangent_factorization,
         "backend": "explicit_svd_nullspace",
     }
 

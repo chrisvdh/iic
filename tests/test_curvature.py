@@ -5,8 +5,10 @@ import torch
 
 from iic.curvature import (
     CurvatureProblem,
+    DiagonalLowRankHessian,
     EvaluationOptions,
     _dense_hessian,
+    _factorize_dense,
     evaluate_dense_curvature,
     evaluate_dense_iic,
     evaluate_iic,
@@ -51,10 +53,108 @@ def test_dense_curvature_matches_diagonal_oracle():
     assert result["estimand_kind"] == "curvature_only"
     assert result["hard_iic"] is None
     assert result["soft_iic"] is None
-    assert result["hstar_factorization"]["backend"] == "cholesky"
-    assert result["inverse_diagnostics"]["backend"] == "cholesky_solve"
+    assert result["hstar_factorization"]["backend"] == "pivoted_lu"
+    assert result["hstar_factorization"][
+        "positive_definite_certified_by_lu"
+    ] is True
+    assert "cholesky_succeeded" not in result["hstar_factorization"]
+    assert result["inverse_diagnostics"]["backend"] == "pivoted_lu_solve"
     assert result["evaluation_timings_seconds"]["total"] > 0.0
     assert result["peak_memory"]["host_peak_rss_bytes"] > 0
+
+
+def test_pivoted_lu_matches_slogdet_and_spectrum_when_requested():
+    matrix = torch.tensor(
+        [[0.0, 2.0], [2.0, 1.0]],
+        dtype=torch.float64,
+    )
+    expected_sign, expected_logabsdet = torch.linalg.slogdet(matrix)
+
+    summary, factor, diagnostics = _factorize_dense(
+        matrix,
+        1e-14,
+        compute_spectrum=True,
+    )
+
+    assert factor is not None
+    assert diagnostics["backend"] == "pivoted_lu"
+    assert diagnostics["definiteness_backend"] == "spectral"
+    assert "cholesky_succeeded" not in diagnostics
+    assert summary["determinant_sign"] == int(expected_sign)
+    assert summary["logabsdet"] == pytest.approx(float(expected_logabsdet))
+    assert summary["status"] == "indefinite"
+
+
+def test_lu_only_path_does_not_call_cholesky_or_spectral_routines(monkeypatch):
+    matrix = torch.diag(torch.tensor([2.0, 8.0], dtype=torch.float64))
+    monkeypatch.setattr(
+        torch.linalg,
+        "cholesky_ex",
+        lambda *_args, **_kwargs: pytest.fail("Cholesky must not be called"),
+    )
+    monkeypatch.setattr(
+        torch.linalg,
+        "eigvalsh",
+        lambda *_args, **_kwargs: pytest.fail("eigvalsh must not be called"),
+    )
+    monkeypatch.setattr(
+        torch.linalg,
+        "eigh",
+        lambda *_args, **_kwargs: pytest.fail("eigh must not be called"),
+    )
+
+    summary, factor, diagnostics = _factorize_dense(matrix, 1e-14)
+
+    assert factor is not None
+    assert summary["status"] == "positive_definite"
+    assert summary["positive_definite_verified"] is True
+    assert diagnostics["definiteness_backend"] == "lu_sylvester_no_row_pivot"
+
+
+def test_positive_lu_determinant_does_not_imply_positive_definiteness():
+    matrix = torch.diag(torch.tensor([-1.0, -2.0], dtype=torch.float64))
+
+    summary, factor, diagnostics = _factorize_dense(matrix, 1e-14)
+
+    assert factor is not None
+    assert summary["determinant_sign"] == 1
+    assert summary["logdet"] == pytest.approx(math.log(2.0))
+    assert summary["status"] == "nonsingular_definiteness_unverified"
+    assert summary["positive_definite_verified"] is False
+    assert diagnostics["positive_definite_certified_by_lu"] is False
+
+
+def test_structured_reference_hessian_avoids_dense_h0_construction():
+    theta = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    diagonal = torch.tensor([2.0, 3.0], dtype=torch.float64)
+
+    def regularizer(candidate):
+        return (
+            0.5 * torch.dot(diagonal, candidate.square())
+            + 0.25 * candidate[0].pow(4)
+        )
+
+    problem = CurvatureProblem(
+        theta_star=theta,
+        constraint_fn=lambda candidate: candidate - theta,
+        regularizer_fn=regularizer,
+        reference_hessian=DiagonalLowRankHessian(
+            reference_point=torch.zeros_like(theta),
+            diagonal=diagonal,
+            factors=theta.new_empty((0, theta.numel())),
+            provenance={"kind": "test_oracle"},
+        ),
+    )
+
+    result = evaluate_dense_iic(
+        problem,
+        _reference(torch.zeros_like(theta)),
+        interpolation_threshold=1e-12,
+    )
+
+    assert result["h0_structured_reference_used"] is True
+    assert result["h0_factorization"]["backend"] == "analytic_diagonal_low_rank"
+    assert result["logdet_H0"] == pytest.approx(math.log(6.0))
 
 
 def test_indefinite_hessian_is_retained_but_not_certified():
@@ -69,12 +169,15 @@ def test_indefinite_hessian_is_retained_but_not_certified():
     result = evaluate_dense_curvature(problem, rhos=(10.0,))
 
     assert result["run_status"] == "success"
-    assert result["h_definiteness"] == "indefinite"
+    assert result["h_definiteness"] == "nonsingular_definiteness_unverified"
     assert result["hard_curvature"] is not None
     assert result["hard_curvature_certified"] is False
     assert result["finite_penalty_curvature"]["10"]["curvature_certified"] is False
-    assert result["hstar_factorization"]["backend"] == "spectral_fallback"
-    assert result["inverse_diagnostics"]["backend"] == "solve"
+    assert result["hstar_factorization"]["backend"] == "pivoted_lu"
+    assert result["hstar_factorization"][
+        "positive_definite_certified_by_lu"
+    ] is False
+    assert result["inverse_diagnostics"]["backend"] == "pivoted_lu_solve"
 
 
 def test_analysis_floor_retains_raw_unresolved_kernel_direction():
@@ -196,7 +299,9 @@ def test_full_iic_matches_constant_metric_oracle():
 
     assert result["energy_term"] == pytest.approx(math.log(17.0))
     assert result["hessian_logdet_gap"] == pytest.approx(0.0)
-    assert result["hessian_volume"]["spectra_reused"] is True
+    assert result["hessian_volume"]["factorizations_reused"] is True
+    assert result["hessian_volume"]["determinant_values_reused"] is True
+    assert result["hessian_volume"]["spectra_reused"] is False
     assert result["hard_curvature"] == pytest.approx(-math.log(4.0))
     assert result["dataset_correction"] == pytest.approx(-math.log(2.0))
     assert result["hard_iic"] == pytest.approx(math.log(17.0 / 8.0))
@@ -278,7 +383,7 @@ def test_full_and_curvature_only_modes_share_curvature_terms():
     )
 
 
-def test_indefinite_reference_hessian_withholds_full_score():
+def test_lu_unverified_reference_hessian_withholds_full_score():
     theta = torch.tensor([2.0, 0.0], dtype=torch.float64)
 
     def regularizer(candidate):
@@ -300,7 +405,8 @@ def test_indefinite_reference_hessian_withholds_full_score():
     )
 
     assert result["regularizer_gap"] > 0.0
-    assert result["h0_definiteness"] == "indefinite"
+    assert result["h0_definiteness"] == "nonsingular_definiteness_unverified"
+    assert result["h0_positive_definite_verified"] is False
     assert result["hard_iic"] is None
     assert result["score_status"] == "diagnostic_continuation_only"
     assert result["diagnostic_continuations"]["hiic_signed_logabs"] is not None

@@ -473,7 +473,7 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
         raise ValueError("evaluation.profile must be cpu, mixed, gpu, or custom")
     profile_defaults = {
         "cpu": ("cpu", "float64", "cpu", "float64"),
-        "mixed": ("cuda", "float32", "cpu", "float64"),
+        "mixed": ("cuda", "float64", "cpu", "float64"),
         "gpu": ("cuda", "float64", "cuda", "float64"),
         "custom": (
             str(evaluation_raw.get("device", legacy_device)),

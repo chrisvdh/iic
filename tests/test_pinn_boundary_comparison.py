@@ -1,11 +1,25 @@
 import json
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from iic.pinn.boundary_comparison import run_boundary_role_comparison
 from iic.pinn.config import load_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_boundary_comparison_rejects_float32_derivatives(tmp_path):
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    config = replace(
+        config,
+        evaluation=replace(config.evaluation, dtype="float32"),
+    )
+
+    with pytest.raises(ValueError, match="native float64"):
+        run_boundary_role_comparison(config, tmp_path / "float32")
 
 
 def test_unmocked_micro_comparison_reuses_one_checkpoint(tmp_path):

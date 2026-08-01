@@ -71,6 +71,45 @@ def test_selected_shards_preserve_indices_and_resume_only_existing(
     assert all(Path(row["stderr_log"]).is_file() for row in results)
 
 
+def test_launcher_forwards_forced_float64_reevaluation(tmp_path, monkeypatch):
+    config = load_config(
+        ROOT / "configs" / "pinn-failure-grid.example.json"
+    )
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 1)
+    commands = []
+    real_run = launcher.subprocess.run
+
+    def fake_run(command, **kwargs):
+        if command[0] == "git":
+            return real_run(command, **kwargs)
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+    output = tmp_path / "reevaluate"
+    (output / "shard-0000").mkdir(parents=True)
+
+    launch_shards(
+        config,
+        ROOT / "configs" / "pinn-failure-grid.example.json",
+        output,
+        stage="evaluation",
+        resume=True,
+        workers=1,
+        cuda_devices=[0],
+        evaluation_dtype="float64",
+        force_evaluation=True,
+        num_shards=845,
+        shard_indices=[0],
+    )
+
+    command = commands[0]
+    assert "--resume" in command
+    assert "--force-evaluation" in command
+    assert command[command.index("--evaluation-dtype") + 1] == "float64"
+
+
 def test_workers_per_gpu_is_a_hard_concurrency_limit(tmp_path, monkeypatch):
     config = load_config(
         ROOT / "configs" / "pinn-failure-grid.example.json"
