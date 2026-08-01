@@ -549,6 +549,7 @@ iic pinn launch \
   --evaluation-dtype float64 \
   --linear-algebra-device cpu \
   --allow-source-mismatch \
+  --allow-data-mismatch \
   --num-shards 845 \
   --workers 4 \
   --cuda-devices 0 1 2 3
@@ -561,6 +562,13 @@ The compatibility config preserves the original checkpoint fingerprint; the
 runtime `--evaluation-dtype` override deliberately does not alter it. New
 training runs should use `configs/pinn-failure-grid.example.json`, whose native
 evaluation dtype is already float64.
+
+The data fingerprint is intentionally strict because it hashes the generated
+arrays. If a reviewed legacy checkpoint has the same declared data
+construction but a different raw-byte fingerprint due to platform or numeric
+library differences, add `--allow-data-mismatch` explicitly. Each affected
+evaluation row then records both fingerprints and the override; this should
+remain a compatibility exception, not a routine production setting.
 
 The `--linear-algebra-device` override is also fingerprint-neutral. Use `cpu`
 for the mixed profile or `cuda` to keep the dense float64 LU factorisation and

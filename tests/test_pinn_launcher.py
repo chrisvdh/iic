@@ -100,6 +100,7 @@ def test_launcher_forwards_forced_float64_reevaluation(tmp_path, monkeypatch):
         cuda_devices=[0],
         evaluation_dtype="float64",
         linear_algebra_device="cuda",
+        allow_data_mismatch=True,
         force_evaluation=True,
         num_shards=845,
         shard_indices=[0],
@@ -114,6 +115,8 @@ def test_launcher_forwards_forced_float64_reevaluation(tmp_path, monkeypatch):
     assert manifest["linear_algebra_device_override"] == "cuda"
     assert manifest["effective_execution_profile"] == "gpu"
     assert manifest["effective_linear_algebra_device"] == "cuda"
+    assert manifest["allow_data_mismatch"] is True
+    assert "--allow-data-mismatch" in command
 
 
 def test_inventory_applies_fingerprint_neutral_gpu_linalg_override(monkeypatch):

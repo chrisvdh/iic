@@ -42,6 +42,7 @@ def launch_shards(
     num_shards: Optional[int] = None,
     shard_indices: Optional[list[int]] = None,
     allow_source_mismatch: bool = False,
+    allow_data_mismatch: bool = False,
     telemetry_interval_seconds: float = 0.0,
     measured_gpu_worker_peak_gib: Optional[float] = None,
     measured_host_worker_peak_gib: Optional[float] = None,
@@ -181,6 +182,7 @@ def launch_shards(
             config.evaluation.linear_algebra_device
         ),
         "force_evaluation": force_evaluation,
+        "allow_data_mismatch": allow_data_mismatch,
         "cuda_visible_devices_inherited": os.environ.get(
             "CUDA_VISIBLE_DEVICES"
         ),
@@ -215,6 +217,8 @@ def launch_shards(
             command.append("--resume")
         if allow_source_mismatch:
             command.append("--allow-source-mismatch")
+        if allow_data_mismatch:
+            command.append("--allow-data-mismatch")
         if curvature_only:
             command.append("--curvature-only")
         if hessian_chunk_size is not None:
@@ -368,6 +372,7 @@ def launch_shards(
         "worker_count": worker_count,
         "capacity_limited": worker_count < requested_workers,
         "requested_workers_per_gpu": requested_gpu_density,
+        "allow_data_mismatch": allow_data_mismatch,
         "effective_workers_per_gpu": effective_gpu_density,
         "successful_workers": sum(
             item["returncode"] == 0 for item in results

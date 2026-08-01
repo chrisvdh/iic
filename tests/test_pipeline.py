@@ -389,6 +389,60 @@ def test_force_evaluation_replaces_success_without_retraining(
     assert status["force_evaluation"] is True
 
 
+def test_data_mismatch_requires_explicit_compatibility_override(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    _patch_training(monkeypatch)
+    monkeypatch.setattr(
+        pipeline,
+        "evaluate_curvature",
+        lambda *_args, **_kwargs: {
+            "estimand_kind": "curvature_only",
+            "run_status": "success",
+            "hard_iic": None,
+            "soft_iic": None,
+            "interpolation_valid": False,
+        },
+    )
+    output = tmp_path / "data-compatible"
+    pipeline.run_pipeline(config, output, curvature_only=True)
+
+    training = json.loads((output / "training.json").read_text())
+    checkpoint_manifest_path = (
+        output / "checkpoints" / f"{training[0]['run_id']}.json"
+    )
+    checkpoint_manifest = json.loads(checkpoint_manifest_path.read_text())
+    checkpoint_manifest["data_fingerprint"] = "legacy-platform-fingerprint"
+    checkpoint_manifest_path.write_text(json.dumps(checkpoint_manifest))
+
+    rejected = pipeline.run_pipeline(
+        config,
+        output,
+        curvature_only=True,
+        resume=True,
+        force_evaluation=True,
+    )
+    assert rejected["run_status"] == "partial_evaluation_failure"
+    rejected_row = json.loads((output / "evaluation.json").read_text())[0]
+    assert rejected_row["error"] == "checkpoint data fingerprint does not match"
+
+    result = pipeline.run_pipeline(
+        config,
+        output,
+        curvature_only=True,
+        resume=True,
+        allow_data_mismatch=True,
+        force_evaluation=True,
+    )
+    assert result["run_status"] == "success"
+    row = json.loads((output / "evaluation.json").read_text())[0]
+    assert row["data_fingerprint_match"] is False
+    assert row["data_mismatch_allowed"] is True
+    assert row["checkpoint_data_fingerprint"] == "legacy-platform-fingerprint"
+
+
 def test_pipeline_rejects_float32_derivative_evaluation(tmp_path):
     config = load_config(ROOT / "configs" / "pinn-smoke.json")
     config = replace(

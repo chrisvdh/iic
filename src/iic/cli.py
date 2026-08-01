@@ -36,6 +36,14 @@ def _parser() -> argparse.ArgumentParser:
             "independent compatibility review."
         ),
     )
+    run.add_argument(
+        "--allow-data-mismatch",
+        action="store_true",
+        help=(
+            "Allow evaluation of a checkpoint whose raw data fingerprint "
+            "differs; record both fingerprints in the output."
+        ),
+    )
     run.add_argument("--num-shards", type=int, default=1)
     run.add_argument("--shard-index", type=int, default=0)
     run.add_argument(
@@ -88,6 +96,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     launch.add_argument("--resume", action="store_true")
     launch.add_argument("--allow-source-mismatch", action="store_true")
+    launch.add_argument("--allow-data-mismatch", action="store_true")
     launch.add_argument("--curvature-only", action="store_true")
     launch.add_argument("--workers", type=int)
     launch.add_argument("--num-shards", type=int)
@@ -116,6 +125,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     calibrate.add_argument("--resume", action="store_true")
     calibrate.add_argument("--allow-source-mismatch", action="store_true")
+    calibrate.add_argument("--allow-data-mismatch", action="store_true")
     calibrate.add_argument("--curvature-only", action="store_true")
     calibrate.add_argument("--workers", type=int)
     calibrate.add_argument("--num-shards", type=int, required=True)
@@ -208,6 +218,7 @@ def main() -> None:
                 num_shards=args.num_shards,
                 shard_indices=args.shard_indices,
                 allow_source_mismatch=args.allow_source_mismatch,
+                allow_data_mismatch=args.allow_data_mismatch,
                 telemetry_interval_seconds=args.telemetry_interval_seconds,
                 measured_gpu_worker_peak_gib=(
                     args.measured_gpu_worker_peak_gib
@@ -356,6 +367,7 @@ def main() -> None:
                     shard_index=args.shard_index,
                     stage=args.stage,
                     allow_source_mismatch=args.allow_source_mismatch,
+                    allow_data_mismatch=args.allow_data_mismatch,
                     force_evaluation=args.force_evaluation,
                 )
     else:

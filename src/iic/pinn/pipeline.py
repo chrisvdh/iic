@@ -529,6 +529,7 @@ def run_pipeline(
     shard_index: int = 0,
     stage: str = "both",
     allow_source_mismatch: bool = False,
+    allow_data_mismatch: bool = False,
     force_evaluation: bool = False,
 ) -> dict[str, Any]:
     """Train and evaluate a shard, retaining every successful checkpoint."""
@@ -623,6 +624,7 @@ def run_pipeline(
     ) if reuse_training else False
     stage_status["active_source_fingerprint"] = current_source["fingerprint"]
     stage_status["force_evaluation"] = force_evaluation
+    stage_status["data_mismatch_allowed"] = allow_data_mismatch
     stage_status["effective_evaluation_dtype"] = config.evaluation.dtype
     stage_status["effective_linear_algebra_device"] = (
         config.evaluation.linear_algebra_device
@@ -882,6 +884,8 @@ def run_pipeline(
             )
         failure_stage = "problem_construction"
         reference_record: dict[str, Any] = {}
+        checkpoint_data_fingerprint: Optional[str] = None
+        data_fingerprint_match: Optional[bool] = None
         try:
             with evaluation_timer.phase("checkpoint_load"):
                 parameter_path = output_path / "checkpoints" / f"{run_id}.npz"
@@ -896,7 +900,13 @@ def run_pipeline(
                     raise ValueError(
                         "checkpoint configuration fingerprint does not match"
                     )
-                if parameter_manifest.get("data_fingerprint") != data.fingerprint:
+                checkpoint_data_fingerprint = parameter_manifest.get(
+                    "data_fingerprint"
+                )
+                data_fingerprint_match = (
+                    checkpoint_data_fingerprint == data.fingerprint
+                )
+                if not data_fingerprint_match and not allow_data_mismatch:
                     raise ValueError("checkpoint data fingerprint does not match")
                 checkpoint_source = parameter_manifest.get("source", {}).get(
                     "fingerprint"
@@ -1003,9 +1013,7 @@ def run_pipeline(
                                 ),
                                 model=model,
                                 config=config,
-                                data_fingerprint=training_row[
-                                    "data_fingerprint"
-                                ],
+                                data_fingerprint=data.fingerprint,
                                 parameter_fingerprint=reference_fingerprint,
                                 evaluation_mode=evaluation_mode,
                                 model_seed=int(training_row["model_seed"]),
@@ -1125,6 +1133,10 @@ def run_pipeline(
                 "evaluation_dtype": config.evaluation.dtype,
                 "linear_algebra_device": config.evaluation.linear_algebra_device,
                 "linear_algebra_dtype": config.evaluation.linear_algebra_dtype,
+                "evaluation_data_fingerprint": data.fingerprint,
+                "checkpoint_data_fingerprint": checkpoint_data_fingerprint,
+                "data_fingerprint_match": data_fingerprint_match,
+                "data_mismatch_allowed": allow_data_mismatch,
             }
         else:
             evaluation_by_id[run_id] = {
@@ -1136,6 +1148,10 @@ def run_pipeline(
                 "evaluation_dtype": config.evaluation.dtype,
                 "linear_algebra_device": config.evaluation.linear_algebra_device,
                 "linear_algebra_dtype": config.evaluation.linear_algebra_dtype,
+                "evaluation_data_fingerprint": data.fingerprint,
+                "checkpoint_data_fingerprint": checkpoint_data_fingerprint,
+                "data_fingerprint_match": data_fingerprint_match,
+                "data_mismatch_allowed": allow_data_mismatch,
             }
         evaluation_by_id[run_id]["pipeline_evaluation_timings_seconds"] = {
             **evaluation_timer.timings,
