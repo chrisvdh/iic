@@ -20,43 +20,43 @@ currently documented as complete IIC workflows.
 
 ## Hard-limit problem
 
-Let \(\theta\in\mathbb R^p\) parameterise a predictor, let
-\(h:\mathbb R^p\rightarrow\mathbb R^N\) be its vector of scalar interpolation
-constraints, and let \(R:\mathbb R^p\rightarrow\mathbb R\) be the full
+Let $\theta\in\mathbb R^p$ parameterise a predictor, let
+$h:\mathbb R^p\rightarrow\mathbb R^N$ be its vector of scalar interpolation
+constraints, and let $R:\mathbb R^p\rightarrow\mathbb R$ be the full
 regularizer. The interpolating manifold is
 
-\[
+$$
 \mathcal M=\{\theta:h(\theta)=0\}.
-\]
+$$
 
-The hard-limit calculation compares a trained parameter \(\theta_\star\) on
-\(\mathcal M\), interpreted as a constrained minimum of \(R\), with an
+The hard-limit calculation compares a trained parameter $\theta_\star$ on
+$\mathcal M$, interpreted as a constrained minimum of $R$, with an
 unconstrained regularizer minimum
 
-\[
+$$
 \theta_0\in\operatorname*{arg\,min}_{\theta}R(\theta).
-\]
+$$
 
-Writing \(A_\star=Dh(\theta_\star)\), the core package defines
+Writing $A_\star=Dh(\theta_\star)$, the core package defines
 
-\[
+$$
 H_\star=\nabla_\theta^2R(\theta_\star),
 \qquad
 H_0=\nabla_\theta^2R(\theta_0).
-\]
+$$
 
 Both are Hessians of the same full regularizer. A least-squares multiplier may
 be computed to diagnose constrained stationarity, but it is never inserted
 into either core Hessian. Multiplier-dependent AIIC curvature is a separate,
 not-yet-public evaluation path. The metric-adjusted constraint kernel is
 
-\[
+$$
 K_H=A_\star H_\star^{-1}A_\star^\mathsf{T}.
-\]
+$$
 
-For \(N=\dim h\), the implemented hard-limit score is
+For $N=\dim h$, the implemented hard-limit score is
 
-\[
+$$
 \operatorname{IIC}_{\mathrm{hard}}
 =
 \underbrace{\log\!\left(R(\theta_\star)-R(\theta_0)\right)}_{
@@ -66,19 +66,19 @@ For \(N=\dim h\), the implemented hard-limit score is
 +\underbrace{\frac{\log\det H_\star-\log\det H_0}{N}}_{
   \text{Hessian-volume gap}}
 -\underbrace{\log N}_{\text{dataset correction}}.
-\]
+$$
 
 The Hessian-volume gap may equivalently be read as
-\(N^{-1}\log\det(H_\star H_0^{-1})\) when the required inverses and
+$N^{-1}\log\det(H_\star H_0^{-1})$ when the required inverses and
 determinants are valid. The package stores the optional direct tangent-space
 `iic`, reduced hard-limit `hiic`, and finite-penalty `siic` separately,
 together with their component terms. Legacy `hard_iic` and `soft_iic` aliases
 remain available.
 
 A theory-valid hard score requires, among other recorded conditions, an
-interpolating \(\theta_\star\), constrained stationarity, a positive
+interpolating $\theta_\star$, constrained stationarity, a positive
 regularizer gap,
-full row rank of \(A_\star\), suitable definiteness of the Hessians and kernel,
+full row rank of $A_\star$, suitable definiteness of the Hessians and kernel,
 and a valid reference point. The dense implementation evaluates all trained
 models, including noninterpolating and failed-regime models, but distinguishes
 the resulting `hard_iic_candidate` from a theory-valid `hard_iic`. It never
@@ -88,11 +88,11 @@ one.
 ## Soft-IIC
 
 The finite-penalty extension replaces the hard constraint-kernel determinant
-by a regularised determinant. Using \(\kappa>0\) for the penalty parameter, so
+by a regularised determinant. Using $\kappa>0$ for the penalty parameter, so
 that it is not confused with the reaction coefficient in the PINN below, the
 implemented score is
 
-\[
+$$
 \operatorname{IIC}_{\mathrm{soft}}(\kappa)
 =
 \log\!\left(R(\theta_\star)-R(\theta_0)\right)
@@ -102,13 +102,13 @@ implemented score is
   -\log\det H_0
 }{N}
 -\log N.
-\]
+$$
 
-The hard kernel is recovered as \(\kappa\rightarrow\infty\) when the limit is
-well defined. Finite \(\kappa\) regularises weak or null constraint directions
+The hard kernel is recovered as $\kappa\rightarrow\infty$ when the limit is
+well defined. Finite $\kappa$ regularises weak or null constraint directions
 and supports analysis away from exact interpolation, while retaining the same
 energy and Hessian-volume terms. Configuration and output fields currently use
-the name `finite_penalty_rhos` for these \(\kappa\) values; that field name is
+the name `finite_penalty_rhos` for these $\kappa$ values; that field name is
 legacy terminology and does not denote the PDE reaction coefficient.
 
 ## Reaction--diffusion PINNs
@@ -116,42 +116,42 @@ legacy terminology and does not denote the PDE reaction coefficient.
 The included end-to-end experiment solves the logistic reaction--diffusion
 equation
 
-\[
+$$
 u_t(x,t)=\nu u_{xx}(x,t)+\rho_{\mathrm{PDE}}u(x,t)
 \left(1-u(x,t)\right),
 \qquad (x,t)\in[0,2\pi)\times[0,1],
-\]
+$$
 
 or, equivalently, uses the residual
 
-\[
+$$
 r_\theta(x,t)
 =u_{\theta,t}-\nu u_{\theta,xx}
 -\rho_{\mathrm{PDE}}u_\theta
 +\rho_{\mathrm{PDE}}u_\theta^2.
-\]
+$$
 
 The initial condition and periodic boundary conditions are
 
-\[
+$$
 u(x,0)
 =\exp\!\left[-\frac{1}{2}
 \left(\frac{x-\pi}{\pi/4}\right)^2\right],
 \qquad
 u(0,t)=u(2\pi,t).
-\]
+$$
 
-For \(\nu>0\), the constraint map additionally enforces
-\(u_x(0,t)=u_x(2\pi,t)\). This derivative-matching block is omitted when
-\(\nu=0\), so the \(\nu=0\) and \(\nu>0\) cases have different constraint
+For $\nu>0$, the constraint map additionally enforces
+$u_x(0,t)=u_x(2\pi,t)$. This derivative-matching block is omitted when
+$\nu=0$, so the $\nu=0$ and $\nu>0$ cases have different constraint
 dimensions and are reported as distinct estimands.
 
 ### Constraint map
 
-For \(n_x\) initial-condition samples and \(n_t\) boundary times, the PINN
+For $n_x$ initial-condition samples and $n_t$ boundary times, the PINN
 constraint map concatenates
 
-\[
+$$
 \begin{aligned}
 h_{\mathrm{initial},i}(\theta)
 &=\sqrt{\frac{2}{n_x}}\left(u(x_i,0)-u_\theta(x_i,0)\right),\\
@@ -161,28 +161,28 @@ h_{\mathrm{derivative},j}(\theta)
 &=\sqrt{\frac{2}{n_t}}\left(u_{\theta,x}(0,t_j)
 -u_{\theta,x}(2\pi,t_j)\right),\qquad \nu>0.
 \end{aligned}
-\]
+$$
 
 The scaling is chosen so that
 
-\[
+$$
 \frac{1}{2}\lVert h(\theta)\rVert^2
 =L_{\mathrm{initial}}(\theta)+L_{\mathrm{boundary}}(\theta),
-\]
+$$
 
 where each included block contributes its mean squared residual. The PDE
-residual is deliberately not part of \(h\): it is an explicit,
-data-dependent regularizer. With the example grid sizes \(n_x=256\) and
-\(n_t=100\), this gives \(N=356\) for \(\nu=0\) and \(N=456\) for
-\(\nu>0\).
+residual is deliberately not part of $h$: it is an explicit,
+data-dependent regularizer. With the example grid sizes $n_x=256$ and
+$n_t=100$, this gives $N=356$ for $\nu=0$ and $N=456$ for
+$\nu>0$.
 
 ### Model and data
 
-The predictor \(u_\theta(x,t)\) is a scalar-output fully connected `tanh`
+The predictor $u_\theta(x,t)$ is a scalar-output fully connected `tanh`
 network. The 13-by-13 failure-grid example uses four hidden layers of width 50,
-giving 7,851 trainable parameters. Weights in a layer with fan-in \(d_\ell\)
-are sampled from \(\mathcal N(0,2/d_\ell)\), and biases are sampled from
-\(\mathcal N(0,1)\).
+giving 7,851 trainable parameters. Weights in a layer with fan-in $d_\ell$
+are sampled from $\mathcal N(0,2/d_\ell)$, and biases are sampled from
+$\mathcal N(0,1)$.
 
 The deterministic comparison solution is generated on the periodic grid by
 Strang splitting: an exact logistic reaction step and a Fourier diffusion
@@ -195,58 +195,58 @@ inserted into the IIC constraint map beyond the initial condition.
 
 The training objective is
 
-\[
+$$
 L_{\mathrm{train}}(\theta)
 =\frac{1}{2}\lVert h(\theta)\rVert^2
 +R_{\mathrm{PDE}}(\theta)
 +R_{\mathrm{wd}}(\theta),
-\]
+$$
 
 with enabled terms
 
-\[
+$$
 R_{\mathrm{PDE}}(\theta)
 =\lambda_{\mathrm{PDE}}\frac{1}{n_f}
 \sum_{k=1}^{n_f}r_\theta(x_k,t_k)^2,
 \qquad
 R_{\mathrm{wd}}(\theta)
 =\frac{\lambda_{\mathrm{wd}}}{2}\lVert\theta\rVert^2.
-\]
+$$
 
 The full regularizer used by IIC is assembled independently as
 
-\[
+$$
 R
 =R_{\mathrm{init}}+R_{\mathrm{PDE}}+R_{\mathrm{wd}},
-\]
+$$
 
 with only enabled components included. The initialization regularizer is the
 negative log-density, up to additive constants, of the Gaussian distribution
 actually used to initialize the network:
 
-\[
+$$
 R_{\mathrm{init}}(\theta)
 =\frac{1}{2}\sum_\ell
 \left(\frac{d_\ell}{2}\lVert W_\ell\rVert_F^2
 +\lVert b_\ell\rVert_2^2\right).
-\]
+$$
 
 This initialization term contributes to the IIC regularizer but is not added
 to the optimization loss merely because the parameters were sampled from that
 distribution. The current failure-grid configuration uses zero weight decay,
-so its full regularizer is \(R=R_{\mathrm{init}}+R_{\mathrm{PDE}}\).
+so its full regularizer is $R=R_{\mathrm{init}}+R_{\mathrm{PDE}}$.
 
-The same assembled \(R\) is used without modification to solve numerically for
-\(\theta_0\), form the energy gap, and construct \(H_\star\) and \(H_0\).
+The same assembled $R$ is used without modification to solve numerically for
+$\theta_0$, form the energy gap, and construct $H_\star$ and $H_0$.
 The current nonlinear reference solver performs deterministic multistart
 gradient descent with Armijo backtracking. It records a stationary candidate
 and does not claim to certify a global minimum.
 
 ## Numerical backends
 
-The constraint kernel \(K_H\) is always materialised as an \(N\times N\)
+The constraint kernel $K_H$ is always materialised as an $N\times N$
 matrix and its determinant is evaluated explicitly. Applying
-\(H_\star^{-1}\) to the Jacobian right-hand sides can use a dense solve, an
+$H_\star^{-1}$ to the Jacobian right-hand sides can use a dense solve, an
 explicitly requested Moore--Penrose pseudoinverse, or matrix-free CG. The
 dense exact path attempts a Cholesky factorisation first and reuses it for both
 the log determinant and kernel solve. If Cholesky fails, the package computes
@@ -259,11 +259,11 @@ The Hessian-volume gap has four backends:
 
 - `exact`: dense Hessians with Cholesky-first exact factors and spectral
   diagnostics on fallback;
-- `first_order`: \(\operatorname{tr}[H_0^{-1}(H_\star-H_0)]\);
+- `first_order`: $\operatorname{tr}[H_0^{-1}(H_\star-H_0)]$;
 - `path`: quadrature of the log-determinant derivative along the straight
-  Hessian path from \(H_0\) to \(H_\star\);
+  Hessian path from $H_0$ to $H_\star$;
 - `slq`: correlated-probe estimates of
-  \(\operatorname{tr}\log H_\star-\operatorname{tr}\log H_0\).
+  $\operatorname{tr}\log H_\star-\operatorname{tr}\log H_0$.
 
 The approximate paths use HVPs, Hutchinson probes, CG, and, where selected,
 Lanczos quadrature. They report estimator uncertainty and solver health and do
@@ -308,7 +308,7 @@ This is a deliberately narrow research implementation:
   certified global minima.
 
 The complete hard-limit score is the default estimand. `--curvature-only`
-provides an explicit ablation that skips \(\theta_0\), \(H_0\), and the energy
+provides an explicit ablation that skips $\theta_0$, $H_0$, and the energy
 gap.
 Numerically complete candidate scores remain available even when stationarity,
 interpolation, or global-minimum certification has not been established; each
@@ -419,7 +419,7 @@ override for a compatibility decision made outside the package; it should not
 be part of a routine cluster command.
 
 For a single full-size timing run on one GPU, shard 420 is the grid member
-\((\nu,\rho,\mathrm{seed})=(3,3,0)\):
+$(\nu,\rho,\mathrm{seed})=(3,3,0)$:
 
 ```bash
 iic pinn launch \
