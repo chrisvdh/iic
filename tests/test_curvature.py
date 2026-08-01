@@ -6,6 +6,7 @@ import torch
 from iic.curvature import (
     CurvatureProblem,
     EvaluationOptions,
+    _dense_hessian,
     evaluate_dense_curvature,
     evaluate_dense_iic,
     evaluate_iic,
@@ -383,3 +384,20 @@ def test_chunked_dense_hessian_matches_unchunked_evaluation():
         unchunked["hiic_candidate"]
     )
     assert chunked["hessian_chunk_size"] == 1
+
+
+def test_chunked_dense_hessian_detaches_and_converts_completed_blocks():
+    point = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    hessian = _dense_hessian(
+        lambda candidate: candidate[0].pow(4) + candidate[1].pow(2),
+        point,
+        chunk_size=1,
+        output_device=torch.device("cpu"),
+        output_dtype=torch.float64,
+    )
+
+    assert hessian.dtype == torch.float64
+    assert hessian.requires_grad is False
+    assert hessian == pytest.approx(
+        torch.diag(torch.tensor([12.0, 2.0], dtype=torch.float64))
+    )

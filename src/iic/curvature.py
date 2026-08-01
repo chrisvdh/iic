@@ -240,13 +240,44 @@ def _dense_hessian(
     point: torch.Tensor,
     *,
     chunk_size: Optional[int],
+    output_device: Optional[torch.device] = None,
+    output_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     if chunk_size is None:
-        return torch.func.hessian(function)(point)
-    return torch.func.jacrev(
-        torch.func.grad(function),
-        chunk_size=chunk_size,
-    )(point)
+        result = torch.func.hessian(function)(point)
+        return result.to(
+            device=output_device or point.device,
+            dtype=output_dtype or point.dtype,
+        ).detach()
+
+    target_device = output_device or point.device
+    target_dtype = output_dtype or point.dtype
+    parameter_count = point.numel()
+    result = torch.empty(
+        (parameter_count, parameter_count),
+        device=target_device,
+        dtype=target_dtype,
+    )
+    gradient = torch.func.grad(function)
+
+    def product(vector: torch.Tensor) -> torch.Tensor:
+        return torch.func.jvp(gradient, (point,), (vector,))[1]
+
+    for start in range(0, parameter_count, chunk_size):
+        stop = min(start + chunk_size, parameter_count)
+        width = stop - start
+        basis = point.new_zeros((width, parameter_count))
+        rows = torch.arange(width, device=point.device)
+        columns = torch.arange(start, stop, device=point.device)
+        basis[rows, columns] = 1
+        block = torch.vmap(product)(basis)
+        result[:, start:stop].copy_(
+            block.detach().T.to(
+                device=target_device,
+                dtype=target_dtype,
+            )
+        )
+    return result
 
 
 def _solve_kernel(
@@ -403,8 +434,9 @@ def _build_star(
                 problem.regularizer_fn,
                 theta,
                 chunk_size=options.hessian_chunk_size,
+                output_device=la_device,
+                output_dtype=la_dtype,
             )
-            hstar = hstar.to(device=la_device, dtype=la_dtype).detach()
             hstar = 0.5 * (hstar + hstar.T)
             if options.numerical_jitter:
                 hstar = hstar + options.numerical_jitter * torch.eye(
@@ -785,11 +817,9 @@ def evaluate_iic(
                 problem.regularizer_fn,
                 theta0_native,
                 chunk_size=options.hessian_chunk_size,
+                output_device=star["la_device"],
+                output_dtype=star["la_dtype"],
             )
-            h0 = h0.to(
-                device=star["la_device"],
-                dtype=star["la_dtype"],
-            ).detach()
             h0 = 0.5 * (h0 + h0.T)
             if options.numerical_jitter:
                 h0 = h0 + options.numerical_jitter * torch.eye(
