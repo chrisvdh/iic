@@ -34,7 +34,7 @@ $\mathcal M$, interpreted as a constrained minimum of $R$, with an
 unconstrained regularizer minimum
 
 $$
-\theta_0\in\operatorname*{arg\,min}_{\theta}R(\theta).
+\theta_0\in\underset{\theta}{\mathrm{arg\,min}}\,R(\theta).
 $$
 
 Writing $A_\star=Dh(\theta_\star)$, the core package defines
@@ -57,7 +57,7 @@ $$
 For $N=\dim h$, the implemented hard-limit score is
 
 $$
-\operatorname{IIC}_{\mathrm{hard}}
+\mathrm{IIC}_{\mathrm{hard}}
 =
 \underbrace{\log\!\left(R(\theta_\star)-R(\theta_0)\right)}_{
   \text{energy gap}}
@@ -93,7 +93,7 @@ that it is not confused with the reaction coefficient in the PINN below, the
 implemented score is
 
 $$
-\operatorname{IIC}_{\mathrm{soft}}(\kappa)
+\mathrm{IIC}_{\mathrm{soft}}(\kappa)
 =
 \log\!\left(R(\theta_\star)-R(\theta_0)\right)
 +\frac{
@@ -259,11 +259,11 @@ The Hessian-volume gap has four backends:
 
 - `exact`: dense Hessians with Cholesky-first exact factors and spectral
   diagnostics on fallback;
-- `first_order`: $\operatorname{tr}[H_0^{-1}(H_\star-H_0)]$;
+- `first_order`: $\mathrm{tr}[H_0^{-1}(H_\star-H_0)]$;
 - `path`: quadrature of the log-determinant derivative along the straight
   Hessian path from $H_0$ to $H_\star$;
 - `slq`: correlated-probe estimates of
-  $\operatorname{tr}\log H_\star-\operatorname{tr}\log H_0$.
+  $\mathrm{tr}\log H_\star-\mathrm{tr}\log H_0$.
 
 The approximate paths use HVPs, Hutchinson probes, CG, and, where selected,
 Lanczos quadrature. They report estimator uncertainty and solver health and do
