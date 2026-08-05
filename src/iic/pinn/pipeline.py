@@ -633,29 +633,71 @@ def run_pipeline(
     _atomic_json(stage_status_path, stage_status)
 
     training_path = output_path / "training.json"
+    spec_run_ids = [
+        f"nu-{point.nu:g}_rho-{point.rho:g}_seed-{seed}"
+        for point, seed in specs
+    ]
+    expected_run_ids = set(spec_run_ids)
+    rows_by_id: dict[str, dict[str, Any]] = {}
     if reuse_training:
+        if not training_path.is_file():
+            raise FileNotFoundError("resume output is missing training.json")
+        stored_rows = json.loads(training_path.read_text(encoding="utf-8"))
+        if not isinstance(stored_rows, list):
+            raise ValueError("training.json must contain a list")
+        for row in stored_rows:
+            run_id = str(row.get("run_id"))
+            if run_id not in expected_run_ids:
+                raise ValueError("training row is outside the selected shard")
+            if run_id in rows_by_id:
+                raise ValueError(f"duplicate training run_id: {run_id}")
+            rows_by_id[run_id] = row
+
+    def _ordered_training_rows() -> list[dict[str, Any]]:
+        return [
+            rows_by_id[run_id]
+            for run_id in spec_run_ids
+            if run_id in rows_by_id
+        ]
+
+    # A pre-empted shard leaves a partial training.json whose completed runs are
+    # already durable on disk. Train only what is missing rather than reusing
+    # the whole file or retraining the whole shard.
+    reused_run_count = len(rows_by_id)
+    pending_specs = [
+        spec
+        for spec, run_id in zip(specs, spec_run_ids)
+        if run_id not in rows_by_id
+    ]
+    if pending_specs and stage == "evaluation":
+        raise ValueError(
+            "the evaluation stage requires complete training rows; "
+            f"{len(pending_specs)} of {len(specs)} runs are missing"
+        )
+
+    if not pending_specs:
         _update_stage_status(
             stage_status_path,
             stage_status,
             stage="training",
             status="reused",
+            run_count=reused_run_count,
+            reused_run_count=reused_run_count,
+            trained_run_count=0,
         )
-        if not training_path.is_file():
-            raise FileNotFoundError("resume output is missing training.json")
-        training_rows = json.loads(training_path.read_text(encoding="utf-8"))
-        if not isinstance(training_rows, list):
-            raise ValueError("training.json must contain a list")
+        training_rows = _ordered_training_rows()
     else:
         _update_stage_status(
             stage_status_path,
             stage_status,
             stage="training",
             status="in_progress",
+            reused_run_count=reused_run_count,
+            pending_run_count=len(pending_specs),
         )
         training_device = _device(config.training.device)
         training_dtype = _dtype(config.training.dtype)
-        training_rows: list[dict[str, Any]] = []
-        for point, seed in specs:
+        for point, seed in pending_specs:
             reset_cuda_peak_memory(training_device)
             run_timer = PhaseTimer()
             run_started = time.perf_counter()
@@ -762,9 +804,10 @@ def run_pipeline(
                 "total": time.perf_counter() - run_started,
             }
             row["pipeline_peak_memory"] = peak_memory_record(training_device)
-            training_rows.append(row)
-            _atomic_json(training_path, training_rows)
+            rows_by_id[run_id] = row
+            _atomic_json(training_path, _ordered_training_rows())
 
+        training_rows = _ordered_training_rows()
         training_failures = sum(
             row.get("success") is not True for row in training_rows
         )
@@ -778,6 +821,8 @@ def run_pipeline(
                 else "completed_with_failures"
             ),
             run_count=len(training_rows),
+            reused_run_count=reused_run_count,
+            trained_run_count=len(pending_specs),
             failure_count=training_failures,
             completed_run_ids=[
                 row["run_id"]
@@ -786,10 +831,6 @@ def run_pipeline(
             ],
         )
 
-    expected_run_ids = {
-        f"nu-{point.nu:g}_rho-{point.rho:g}_seed-{seed}"
-        for point, seed in specs
-    }
     actual_run_ids = {str(row.get("run_id")) for row in training_rows}
     if actual_run_ids != expected_run_ids:
         raise ValueError("training rows do not match the selected shard")

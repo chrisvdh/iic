@@ -346,6 +346,87 @@ def test_resume_reuses_checkpoint_and_retries_failed_evaluation(
     assert rows[0]["success"] is True
 
 
+def _two_run_config(tmp_path):
+    raw = json.loads(
+        (ROOT / "configs" / "pinn-smoke.json").read_text(encoding="utf-8")
+    )
+    raw["points"] = [{"nu": 0.5, "rho": 1.0}, {"nu": 0.5, "rho": 2.0}]
+    path = tmp_path / "two-run.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return load_config(path)
+
+
+def test_partial_training_resume_trains_only_the_missing_runs(
+    tmp_path,
+    monkeypatch,
+):
+    config = _two_run_config(tmp_path)
+    _patch_training(monkeypatch)
+    output = tmp_path / "campaign"
+    pipeline.run_pipeline(config, output, curvature_only=True, stage="training")
+    rows = json.loads((output / "training.json").read_text(encoding="utf-8"))
+    assert len(rows) == 2
+
+    # Simulate pre-emption after the first run committed: the second row and
+    # its checkpoint never reached disk.
+    dropped = rows[1]["run_id"]
+    (output / "training.json").write_text(
+        json.dumps(rows[:1]), encoding="utf-8"
+    )
+    (output / "checkpoints" / f"{dropped}.npz").unlink()
+    (output / "checkpoints" / f"{dropped}.json").unlink()
+
+    trained: list[tuple[float, float]] = []
+
+    def counting_train(model, data, run_config, **kwargs):
+        trained.append((kwargs["nu"], kwargs["rho"]))
+        return _fake_train(model, data, run_config, **kwargs)
+
+    monkeypatch.setattr(pipeline, "train", counting_train)
+    summary = pipeline.run_pipeline(
+        config,
+        output,
+        curvature_only=True,
+        stage="training",
+        resume=True,
+    )
+
+    assert trained == [(0.5, 2.0)]
+    assert summary["run_status"] == "success"
+    resumed = json.loads((output / "training.json").read_text(encoding="utf-8"))
+    assert [row["run_id"] for row in resumed] == [
+        row["run_id"] for row in rows
+    ]
+    status = json.loads(
+        (output / "stage_status.json").read_text(encoding="utf-8")
+    )
+    assert status["stages"]["training"]["reused_run_count"] == 1
+    assert status["stages"]["training"]["trained_run_count"] == 1
+    assert (output / "checkpoints" / f"{dropped}.npz").is_file()
+
+
+def test_evaluation_stage_rejects_incomplete_training_rows(
+    tmp_path,
+    monkeypatch,
+):
+    config = _two_run_config(tmp_path)
+    _patch_training(monkeypatch)
+    output = tmp_path / "campaign"
+    pipeline.run_pipeline(config, output, curvature_only=True, stage="training")
+    rows = json.loads((output / "training.json").read_text(encoding="utf-8"))
+    (output / "training.json").write_text(
+        json.dumps(rows[:1]), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="complete training rows"):
+        pipeline.run_pipeline(
+            config,
+            output,
+            curvature_only=True,
+            stage="evaluation",
+        )
+
+
 def test_force_evaluation_replaces_success_without_retraining(
     tmp_path,
     monkeypatch,
