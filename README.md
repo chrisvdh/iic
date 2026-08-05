@@ -91,6 +91,51 @@ energy and Hessian-volume terms. Configuration and output fields currently use
 the name `finite_penalty_rhos` for these $\kappa$ values; that field name is
 legacy terminology and does not denote the PDE reaction coefficient.
 
+## What these scores are expected to predict
+
+$\mathrm{IIC}_{\mathrm{hard}}$ and $\mathrm{IIC}_{\mathrm{soft}}(\kappa)$ are
+scores for a model that already interpolates the full constraint set. They are
+not expected to correlate with test error across models, and a weak or absent
+correlation is not evidence that the construction is wrong. Both scores
+normalise by $N$ and are dominated by the energy and Hessian-volume terms,
+which describe how the regularizer is shaped around $\theta_\star$ rather than
+how well an unseen row would have been predicted.
+
+The quantity that carries a predictive interpretation is conditional. Partition
+the scalar constraint rows as $D=A\sqcup H$, where $A$ is a conditioning subset
+and $H$ is the scored remainder, with $N_A+N_H=N$. Write $A_S$ for the rows of
+$A_\star$ selected by $S$ and
+
+$$K_S=A_S H_\star^{-1}A_S^\mathsf{T}.$$
+
+Holding the full-data evaluation point $\theta_\star$, the reference $\theta_0$,
+the regularizer $R$, and the metric $H_\star$ fixed, the inherited temperature is
+
+$$\tau_\star=\frac{2\left(R(\theta_\star)-R(\theta_0)\right)}{N},$$
+
+and the unnormalised conditional quantity is
+
+$$C(H\mid A)=N_H\log\left(\pi\tau_\star\right)+\log\det K_D-\log\det K_A,$$
+
+with normalised hard candidate $C(H\mid A)/N_H$ and a finite-penalty variant
+obtained by replacing each determinant with its $\kappa^{-1}I$-shifted form.
+$C(H\mid A)$ is the canonical comparison primitive: subtracting two already
+normalised IIC rows is a different quantity and is not a substitute for it.
+
+Because $A$ is conditioned on rather than retrained on, this is a plugin
+construction. It reuses the full-data $\theta_\star$ and $\tau_\star$ and is not
+an exact conditional marginal likelihood obtained by refitting on $A$; the
+temperature is never recomputed on the subset. The expectation is that
+$C(H\mid A)$ tracks held-out behaviour in a way the unconditional scores do not,
+because scoring $H$ given $A$ is the quantity that asks what the remaining rows
+cost once the conditioning rows are accounted for.
+
+**This is not implemented.** The package currently computes the unconditional
+hard, soft, and curvature-only quantities only. The description above records
+the intended construction and its interpretation; no conditional field,
+estimand label, or CLI option exists yet, and no empirical correlation has been
+established for it.
+
 ## Reaction--diffusion PINNs
 
 The included end-to-end experiment solves the logistic reaction-diffusion
