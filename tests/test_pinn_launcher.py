@@ -168,6 +168,95 @@ def test_launcher_continues_locally_when_the_remote_is_unreachable(
     )
 
 
+def test_dry_run_resolves_the_plan_without_touching_the_output_tree(
+    tmp_path,
+    monkeypatch,
+):
+    from iic.pinn.launcher import launch_plan
+    from iic.pinn.sync import RsyncTransport
+
+    config = load_config(ROOT / "configs" / "pinn-failure-grid.example.json")
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    output = tmp_path / "campaign"
+
+    plan = launch_plan(
+        config,
+        output,
+        cuda_devices=[0, 1],
+        num_shards=845,
+        sync_transport=RsyncTransport(
+            host="h200-node-3", destination="/mnt/persist/iic-campaigns"
+        ),
+    )
+
+    assert plan["dry_run"] is True
+    assert plan["campaign"]["total_run_count"] == 845
+    assert plan["sharding"]["num_shards"] == 845
+    assert plan["sharding"]["one_run_per_shard"] is True
+    assert plan["devices"]["selected_cuda_devices"] == [0, 1]
+    assert plan["outputs"]["lock_currently_held_by"] is None
+    # Nothing is created, claimed, or written by a dry run.
+    assert not output.exists()
+
+
+def test_dry_run_redacts_the_sync_destination(tmp_path, monkeypatch):
+    from iic.pinn.launcher import launch_plan
+    from iic.pinn.sync import RsyncTransport
+
+    config = load_config(ROOT / "configs" / "pinn-failure-grid.example.json")
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 1)
+
+    plan = launch_plan(
+        config,
+        tmp_path / "campaign",
+        cuda_devices=[0],
+        sync_transport=RsyncTransport(
+            host="h200-node-3",
+            destination="/mnt/persist/secret-project/iic-campaigns",
+            port=2222,
+        ),
+    )
+
+    synchronization = plan["synchronization"]
+    assert synchronization["enabled"] is True
+    assert synchronization["host"] == "h200-node-3"
+    assert synchronization["port"] == 2222
+    assert synchronization["destination_leaf"] == ".../iic-campaigns"
+    # The full remote path never appears in the printed plan.
+    assert "secret-project" not in json.dumps(plan)
+
+
+def test_dry_run_warns_when_no_destination_is_configured(tmp_path, monkeypatch):
+    from iic.pinn.launcher import launch_plan
+
+    config = load_config(ROOT / "configs" / "pinn-failure-grid.example.json")
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 1)
+
+    plan = launch_plan(config, tmp_path / "campaign", cuda_devices=[0])
+
+    assert plan["synchronization"]["enabled"] is False
+    assert "lost if it is reclaimed" in plan["synchronization"]["note"]
+
+
+def test_dry_run_reports_an_output_tree_another_launcher_holds(tmp_path):
+    from iic.pinn.launcher import launch_plan
+
+    config = load_config(ROOT / "configs" / "pinn-smoke.json")
+    output = tmp_path / "campaign"
+    output.mkdir()
+    launcher._claim_output_lock(output)
+
+    plan = launch_plan(config, output)
+
+    holder = plan["outputs"]["lock_currently_held_by"]
+    assert holder is not None
+    assert holder["pid"] == launcher.os.getpid()
+
+
 def test_second_launcher_refuses_a_live_output_tree(tmp_path):
     output = tmp_path / "campaign"
     output.mkdir()

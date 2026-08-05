@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import os
@@ -22,7 +23,7 @@ import torch
 from iic.provenance import source_identity
 from iic.telemetry import ResourceMonitor, host_total_memory_bytes
 from .config import PinnRunConfig, apply_evaluation_runtime_overrides
-from .pipeline import _atomic_json
+from .pipeline import _atomic_json, _run_specs
 from .sync import CampaignSync, SyncPolicy, SyncTransport
 
 
@@ -436,6 +437,221 @@ def launch_shards(
     summary["remote_behind"] = summary["synchronization"]["remote_behind"]
     _atomic_json(output / "launcher_summary.json", summary)
     return summary
+
+
+def launch_plan(
+    config: PinnRunConfig,
+    output: Path,
+    *,
+    stage: str = "both",
+    curvature_only: bool = False,
+    workers: Optional[int] = None,
+    workers_per_gpu: Optional[int] = None,
+    cpu_threads_per_worker: Optional[int] = None,
+    cuda_devices: Optional[list[int]] = None,
+    hessian_chunk_size: Optional[int] = None,
+    evaluation_dtype: Optional[str] = None,
+    linear_algebra_device: Optional[str] = None,
+    num_shards: Optional[int] = None,
+    shard_indices: Optional[list[int]] = None,
+    measured_gpu_worker_peak_gib: Optional[float] = None,
+    measured_host_worker_peak_gib: Optional[float] = None,
+    memory_reserve_fraction: float = 0.15,
+    sync_transport: Optional[SyncTransport] = None,
+    sync_interval_seconds: float = 300.0,
+) -> dict[str, Any]:
+    """Resolve a launch without training, evaluating, or claiming the tree.
+
+    Everything reported here is decided before any GPU work begins, so a
+    mistake in sharding, device mapping, or the sync destination is visible
+    before a campaign burns accelerator hours on it.
+    """
+
+    config = apply_evaluation_runtime_overrides(
+        config,
+        dtype=evaluation_dtype,
+        linear_algebra_device=linear_algebra_device,
+        hessian_chunk_size=hessian_chunk_size,
+    )
+    requested_workers = config.evaluation.workers if workers is None else workers
+    requested_gpu_density = (
+        config.evaluation.workers_per_gpu
+        if workers_per_gpu is None
+        else workers_per_gpu
+    )
+    cpu_threads = (
+        config.evaluation.cpu_threads_per_worker
+        if cpu_threads_per_worker is None
+        else cpu_threads_per_worker
+    )
+    _validate_runtime_controls(
+        requested_workers=requested_workers,
+        workers_per_gpu=requested_gpu_density,
+        cpu_threads_per_worker=cpu_threads,
+        telemetry_interval_seconds=0.0,
+        measured_gpu_worker_peak_gib=measured_gpu_worker_peak_gib,
+        measured_host_worker_peak_gib=measured_host_worker_peak_gib,
+        memory_reserve_fraction=memory_reserve_fraction,
+    )
+    shard_count = (
+        min(requested_workers, config.run_count)
+        if num_shards is None
+        else num_shards
+    )
+    if shard_count < 1 or shard_count > config.run_count:
+        raise ValueError("num_shards must lie between one and the run count")
+    selected_shards = (
+        list(range(shard_count)) if shard_indices is None else list(shard_indices)
+    )
+
+    cuda_required = _cuda_required(config)
+    devices = _cuda_devices(config, require_available=False, override=cuda_devices)
+    memory_guard = _memory_guard(
+        devices=devices if cuda_required else [],
+        requested_workers_per_gpu=requested_gpu_density,
+        measured_gpu_worker_peak_gib=measured_gpu_worker_peak_gib,
+        measured_host_worker_peak_gib=measured_host_worker_peak_gib,
+        memory_reserve_fraction=memory_reserve_fraction,
+    )
+    effective_gpu_density = int(memory_guard["effective_workers_per_gpu"])
+    mapping_capacity = (
+        len(devices) * effective_gpu_density if cuda_required else requested_workers
+    )
+    worker_count = max(
+        1,
+        min(
+            requested_workers,
+            len(selected_shards),
+            mapping_capacity if mapping_capacity else requested_workers,
+            _optional_capacity(memory_guard["host_worker_capacity"]),
+        ),
+    )
+    runs_per_shard = sorted(
+        {
+            len(_run_specs(config, num_shards=shard_count, shard_index=index))
+            for index in selected_shards
+        }
+    )
+    mode = "curvature_only" if curvature_only else config.evaluation.mode
+    existing_lock = _read_lock(output / LOCK_FILENAME)
+
+    return {
+        "schema_version": 1,
+        "dry_run": True,
+        "campaign": {
+            "name": config.name,
+            "mode": config.mode,
+            "config_fingerprint": config.fingerprint,
+            "total_run_count": config.run_count,
+            "point_count": len(config.points),
+            "seeds": list(config.seeds),
+            "stage": stage,
+        },
+        "sharding": {
+            "num_shards": shard_count,
+            "selected_shard_count": len(selected_shards),
+            "first_selected_shards": selected_shards[:5],
+            "runs_per_selected_shard": runs_per_shard,
+            "one_run_per_shard": runs_per_shard == [1],
+            "note": (
+                "One run per shard gives the finest pre-emption granularity "
+                "and the most frequent synchronization."
+                if runs_per_shard == [1]
+                else "A pre-empted shard resumes from its partial training "
+                "rows; smaller shards lose less in-flight work."
+            ),
+        },
+        "data": {
+            "nx": config.data.nx,
+            "nt": config.data.nt,
+            "n_collocation": config.data.n_collocation,
+            "collocation_seed": config.data.collocation_seed,
+        },
+        "estimand": {
+            "estimand_kind": mode,
+            "boundary_role": config.regularizer.boundary_role,
+            "boundary_weight": config.regularizer.boundary_weight,
+            "reference_solve_enabled": mode == "full_iic" and stage != "training",
+            "hessian_backend": config.evaluation.hessian_backend,
+            "inverse_backend": config.evaluation.inverse_backend,
+            "volume_backend": config.evaluation.volume_backend,
+            "finite_penalty_kappas": list(config.evaluation.finite_penalty_rhos),
+        },
+        "devices": {
+            "cuda_required": cuda_required,
+            "cuda_available": bool(torch.cuda.is_available()),
+            "visible_cuda_device_count": (
+                torch.cuda.device_count() if torch.cuda.is_available() else 0
+            ),
+            "cuda_visible_devices_inherited": os.environ.get(
+                "CUDA_VISIBLE_DEVICES"
+            ),
+            "selected_cuda_devices": devices,
+            "worker_count": worker_count,
+            "requested_workers": requested_workers,
+            "effective_workers_per_gpu": effective_gpu_density,
+            "cpu_threads_per_worker": cpu_threads,
+            "launch_slots": _launch_slots(
+                devices=devices if cuda_required else [],
+                workers_per_gpu=effective_gpu_density,
+                worker_count=worker_count,
+            ),
+            "memory_guard": memory_guard,
+            "autodiff_device": config.evaluation.device,
+            "autodiff_dtype": config.evaluation.dtype,
+            "linear_algebra_device": config.evaluation.linear_algebra_device,
+            "linear_algebra_dtype": config.evaluation.linear_algebra_dtype,
+        },
+        "outputs": {
+            "output_directory": str(output),
+            "shard_directory_pattern": str(output / "shard-NNNN"),
+            "launcher_lock": str(output / LOCK_FILENAME),
+            "lock_currently_held_by": (
+                {
+                    "hostname": existing_lock.get("hostname"),
+                    "pid": existing_lock.get("pid"),
+                    "acquired_at": existing_lock.get("acquired_at"),
+                }
+                if existing_lock
+                else None
+            ),
+        },
+        "synchronization": _redacted_sync(sync_transport, sync_interval_seconds),
+        "source": source_identity(),
+    }
+
+
+def _redacted_sync(
+    transport: Optional[SyncTransport],
+    interval_seconds: float,
+) -> dict[str, Any]:
+    """Describe the sync destination without echoing full machine paths."""
+
+    if transport is None:
+        return {
+            "enabled": False,
+            "note": (
+                "No destination configured. Completed work stays only on this "
+                "instance and is lost if it is reclaimed."
+            ),
+        }
+    described = transport.describe()
+    destination = described.get("destination") or described.get("root")
+    return {
+        "enabled": True,
+        "transport": described.get("transport"),
+        "host": described.get("host"),
+        "port": described.get("port"),
+        "destination_leaf": (
+            f".../{Path(str(destination)).name}" if destination else None
+        ),
+        "destination_fingerprint": (
+            hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:12]
+            if destination
+            else None
+        ),
+        "interval_seconds": interval_seconds,
+    }
 
 
 LOCK_FILENAME = "launcher_lock.json"

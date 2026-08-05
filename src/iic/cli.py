@@ -153,6 +153,11 @@ def _parser() -> argparse.ArgumentParser:
         choices=("training", "evaluation", "both"),
         default="both",
     )
+    launch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve and print the launch plan without training anything.",
+    )
     launch.add_argument("--resume", action="store_true")
     launch.add_argument("--allow-source-mismatch", action="store_true")
     launch.add_argument("--allow-data-mismatch", action="store_true")
@@ -291,6 +296,40 @@ def main() -> None:
 
             config = load_pinn_config(args.config)
             sync_transport, sync_policy = _sync_from_args(args)
+            if getattr(args, "dry_run", False):
+                from .pinn.launcher import launch_plan
+
+                print(
+                    json.dumps(
+                        launch_plan(
+                            config,
+                            args.output,
+                            stage=args.stage,
+                            curvature_only=args.curvature_only,
+                            workers=args.workers,
+                            workers_per_gpu=args.workers_per_gpu,
+                            cpu_threads_per_worker=args.cpu_threads_per_worker,
+                            cuda_devices=args.cuda_devices,
+                            hessian_chunk_size=args.hessian_chunk_size,
+                            evaluation_dtype=args.evaluation_dtype,
+                            linear_algebra_device=args.linear_algebra_device,
+                            num_shards=args.num_shards,
+                            shard_indices=args.shard_indices,
+                            measured_gpu_worker_peak_gib=(
+                                args.measured_gpu_worker_peak_gib
+                            ),
+                            measured_host_worker_peak_gib=(
+                                args.measured_host_worker_peak_gib
+                            ),
+                            memory_reserve_fraction=args.memory_reserve_fraction,
+                            sync_transport=sync_transport,
+                            sync_interval_seconds=args.sync_interval_seconds,
+                        ),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return
             launch_result = launch_shards(
                 config,
                 args.config,
