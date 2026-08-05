@@ -10,10 +10,18 @@ from .config import PinnRunConfig
 from .pipeline import _atomic_json, _gate
 
 
-def _rows(path: Path, name: str) -> list[dict[str, Any]]:
-    value = json.loads((path / name).read_text(encoding="utf-8"))
+def _rows(path: Path, name: str, *, optional: bool = False) -> list[dict[str, Any]]:
+    source = path / name
+    if not source.is_file():
+        if optional:
+            # A shard whose runs all failed to train never reaches evaluation
+            # and so never writes an evaluation file. That is an empty result,
+            # not a broken shard; coverage checks below still catch real gaps.
+            return []
+        raise FileNotFoundError(f"shard is missing {name}: {path}")
+    value = json.loads(source.read_text(encoding="utf-8"))
     if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
-        raise ValueError(f"{path / name} must contain a list of objects")
+        raise ValueError(f"{source} must contain a list of objects")
     return value
 
 
@@ -74,7 +82,7 @@ def merge_shards(
             if run_id in training_by_id:
                 raise ValueError(f"duplicate training run_id: {run_id}")
             training_by_id[run_id] = row
-        for row in _rows(path, "evaluation.json"):
+        for row in _rows(path, "evaluation.json", optional=True):
             run_id = str(row.get("run_id"))
             if run_id in evaluation_by_id:
                 raise ValueError(f"duplicate evaluation run_id: {run_id}")

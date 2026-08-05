@@ -145,6 +145,38 @@ def test_status_retains_failed_runs_rather_than_dropping_them(tmp_path):
     assert status["complete"] is True
 
 
+def test_failed_evaluation_is_an_outcome_not_outstanding_work(tmp_path):
+    config = _config(
+        tmp_path,
+        [{"nu": 0.5, "rho": 1.0}, {"nu": 0.5, "rho": 2.0}],
+    )
+    output = tmp_path / "campaign"
+    output.mkdir()
+    ids = [f"nu-0.5_rho-{value:g}_seed-0" for value in (1.0, 2.0)]
+    _write_shard(
+        output,
+        config,
+        shard_index=0,
+        num_shards=1,
+        training=[{"run_id": run_id, "success": True} for run_id in ids],
+        evaluation=[
+            {"run_id": ids[0], "success": True},
+            {
+                "run_id": ids[1],
+                "success": False,
+                "run_status": "evaluation_failed",
+            },
+        ],
+    )
+
+    status = campaign_status(config, output)
+
+    assert status["totals"]["evaluated_failed"] == 1
+    # The failure is reported, but it does not read as work still to do.
+    assert status["pending_evaluation_run_ids"] == []
+    assert status["complete"] is True
+
+
 def test_status_flags_a_shard_from_a_different_configuration(tmp_path):
     config = _config(tmp_path, [{"nu": 0.5, "rho": 1.0}])
     output = tmp_path / "campaign"

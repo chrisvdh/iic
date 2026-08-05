@@ -57,11 +57,16 @@ def campaign_status(
         evaluated_failed |= set(record.pop("_evaluated_failed"))
         shards.append(record)
 
-    untrained = [run_id for run_id in expected_ids if run_id not in trained_ok | trained_failed]
+    attempted = trained_ok | trained_failed
+    untrained = [run_id for run_id in expected_ids if run_id not in attempted]
+    # A failed evaluation has an outcome and is not outstanding work. Counting
+    # it as pending would keep a finished campaign from ever reporting
+    # complete, so failures are surfaced separately instead.
+    evaluated_any = evaluated_ok | evaluated_failed
     pending_evaluation = [
         run_id
         for run_id in expected_ids
-        if run_id in trained_ok and run_id not in evaluated_ok
+        if run_id in trained_ok and run_id not in evaluated_any
     ]
 
     return {

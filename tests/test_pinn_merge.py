@@ -68,6 +68,50 @@ def test_merge_proves_complete_disjoint_shard_coverage(tmp_path):
     assert [row["model_seed"] for row in rows] == [0, 1]
 
 
+def test_merge_accepts_a_shard_whose_only_run_failed_to_train(tmp_path):
+    config = _config(tmp_path)
+    shard0 = tmp_path / "shard0"
+    shard1 = tmp_path / "shard1"
+    _shard(shard0, config, 0, 0)
+    _shard(shard1, config, 1, 1)
+    # A run that fails to train never reaches evaluation, so a fine-grained
+    # shard containing only that run writes no evaluation file at all.
+    (shard1 / "training.json").write_text(
+        json.dumps(
+            [
+                {
+                    "run_id": "nu-0.5_rho-1_seed-1",
+                    "nu": 0.5,
+                    "rho": 1.0,
+                    "model_seed": 1,
+                    "success": False,
+                    "run_status": "training_failed",
+                }
+            ]
+        )
+    )
+    (shard1 / "evaluation.json").unlink()
+
+    summary = merge_shards(config, [shard0, shard1], tmp_path / "merged")
+
+    assert summary["evaluation_count"] == 1
+    training = json.loads((tmp_path / "merged" / "training.json").read_text())
+    # The failed run is retained in the merged output, not dropped.
+    assert [row["success"] for row in training] == [True, False]
+
+
+def test_merge_still_rejects_a_shard_missing_its_training_file(tmp_path):
+    config = _config(tmp_path)
+    shard0 = tmp_path / "shard0"
+    shard1 = tmp_path / "shard1"
+    _shard(shard0, config, 0, 0)
+    _shard(shard1, config, 1, 1)
+    (shard1 / "training.json").unlink()
+
+    with pytest.raises(FileNotFoundError, match="missing training.json"):
+        merge_shards(config, [shard0, shard1], tmp_path / "merged")
+
+
 def test_merge_rejects_missing_shards(tmp_path):
     config = _config(tmp_path)
     shard0 = tmp_path / "shard0"
