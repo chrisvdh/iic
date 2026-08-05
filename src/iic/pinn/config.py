@@ -82,6 +82,7 @@ class RegularizerConfig:
     pde_weight: float
     boundary_role: str
     boundary_weight: float
+    pde_role: str = "explicit_regularizer"
 
 
 @dataclass(frozen=True)
@@ -498,7 +499,19 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
         pde_weight=float(regularizer_raw.get("pde_weight", 1.0)),
         boundary_role=str(regularizer_raw["boundary_role"]),
         boundary_weight=float(regularizer_raw["boundary_weight"]),
+        pde_role=str(
+            regularizer_raw.get("pde_role", "explicit_regularizer")
+        ),
     )
+    if regularizer.pde_role not in {"explicit_regularizer", "constraint"}:
+        raise ValueError(
+            "pde_role must be explicit_regularizer or constraint"
+        )
+    if regularizer.pde_role == "constraint" and not regularizer.include_pde:
+        raise ValueError(
+            "pde_role=constraint requires include_pde so the residual block "
+            "is defined"
+        )
     if (
         not math.isfinite(regularizer.pde_weight)
         or regularizer.pde_weight < 0

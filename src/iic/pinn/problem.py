@@ -150,11 +150,29 @@ def build_functions(
             blocks.append(boundary_scale * (lower_grad[:, 0] - upper_grad[:, 0]))
         return torch.cat(blocks)
 
-    def constraint_fn(candidate: torch.Tensor) -> torch.Tensor:
+    def training_constraint_fn(candidate: torch.Tensor) -> torch.Tensor:
+        """The squared block of the reference PINN training loss.
+
+        Deliberately independent of ``pde_role``: the training objective is the
+        reference PINN loss, in which the PDE term always enters as a mean
+        squared residual. Which residuals count as constraints is a statement
+        about the estimand, not about how theta_star was obtained.
+        """
+
         data_residuals = data_constraint_fn(candidate)
         if config.regularizer.boundary_role == "constraint":
             return torch.cat((data_residuals, boundary_residual_fn(candidate)))
         return data_residuals
+
+    def constraint_fn(candidate: torch.Tensor) -> torch.Tensor:
+        blocks = [data_constraint_fn(candidate)]
+        if config.regularizer.boundary_role == "constraint":
+            blocks.append(boundary_residual_fn(candidate))
+        if config.regularizer.pde_role == "constraint":
+            # The constraint block is the residual vector itself, never the
+            # scalar mean squared PDE loss.
+            blocks.append(pde_residuals(candidate))
+        return blocks[0] if len(blocks) == 1 else torch.cat(blocks)
 
     def boundary_regularizer_fn(candidate: torch.Tensor) -> torch.Tensor:
         residuals = boundary_residual_fn(candidate)
@@ -167,7 +185,7 @@ def build_functions(
         return 0.5 * float(config.training.weight_decay) * candidate.square().sum()
 
     def training_objective_fn(candidate: torch.Tensor) -> torch.Tensor:
-        constraints = constraint_fn(candidate)
+        constraints = training_constraint_fn(candidate)
         objective = 0.5 * constraints.square().sum()
         if config.regularizer.boundary_role == "explicit_regularizer":
             objective = objective + boundary_regularizer_fn(candidate)
@@ -198,7 +216,11 @@ def build_functions(
             ),
             "pde": (
                 pde_regularizer_fn(candidate)
-                if config.regularizer.include_pde
+                if (
+                    config.regularizer.include_pde
+                    and config.regularizer.pde_role == "explicit_regularizer"
+                )
+                # Promoted to the constraint map, so it must not also enter R.
                 else zero
             ),
             "boundary": (
@@ -221,7 +243,11 @@ def build_functions(
         name
         for name, enabled in (
             ("initialization", config.regularizer.include_initialization),
-            ("pde", config.regularizer.include_pde),
+            (
+                "pde",
+                config.regularizer.include_pde
+                and config.regularizer.pde_role == "explicit_regularizer",
+            ),
             (
                 "boundary",
                 config.regularizer.boundary_role == "explicit_regularizer",
@@ -254,7 +280,18 @@ def build_functions(
             "B_boundary(theta) = boundary_weight * "
             "(periodic_value_MSE + included_periodic_derivative_MSE)"
         ),
-        "pde_role": "explicit_data_dependent_regularizer",
+        "pde_role": (
+            "explicit_data_dependent_regularizer"
+            if config.regularizer.pde_role == "explicit_regularizer"
+            else "constraint"
+        ),
+        "pde_constraint_target": (
+            "zero" if config.regularizer.pde_role == "constraint" else None
+        ),
+        "pde_constraint_block_is_residual_vector": (
+            config.regularizer.pde_role == "constraint"
+        ),
+        "training_objective_independent_of_pde_role": True,
         "nu_zero_policy": (
             "no_periodic_derivative_matching"
             if float(nu) == 0.0

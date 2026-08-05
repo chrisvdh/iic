@@ -1,0 +1,103 @@
+{
+  "name": "campaign-a-pde-as-constraint",
+  "mode": "experiment",
+  "seeds": [0, 1, 2, 3, 4],
+  "grid": {
+    "nu": {
+      "start": 0.0,
+      "stop": 6.0,
+      "step": 0.5
+    },
+    "rho": {
+      "start": 0.0,
+      "stop": 6.0,
+      "step": 0.5
+    }
+  },
+  "data": {
+    "nx": 256,
+    "nt": 100,
+    "n_collocation": 1000,
+    "collocation_seed": 0,
+    "collocation_sampler": "legacy_fixed_state",
+    "nx_evaluation": 2048,
+    "nt_evaluation": 100
+  },
+  "model": {
+    "hidden_widths": [50, 50, 50, 50],
+    "activation": "tanh",
+    "initialization": "he_normal"
+  },
+  "training": {
+    "device": "cuda",
+    "dtype": "float32",
+    "weight_decay": 0.0,
+    "phases": [
+      {
+        "optimizer": "lbfgs",
+        "learning_rate": 1.0,
+        "max_iter": 3000,
+        "max_eval": 3750,
+        "history_size": 100,
+        "tolerance_grad": 1e-07,
+        "tolerance_change": 1e-09,
+        "line_search_fn": "strong_wolfe"
+      }
+    ]
+  },
+  "regularizer": {
+    "include_initialization": true,
+    "include_pde": true,
+    "include_bea": false,
+    "pde_weight": 1.0,
+    "pde_role": "constraint",
+    "boundary_role": "explicit_regularizer",
+    "boundary_weight": 1.0
+  },
+  "evaluation": {
+    "mode": "full_iic",
+    "profile": "mixed",
+    "device": "cuda",
+    "dtype": "float64",
+    "linear_algebra_device": "cpu",
+    "linear_algebra_dtype": "float64",
+    "hessian_backend": "dense",
+    "inverse_backend": "solve",
+    "volume_backend": "exact",
+    "compute_direct_iic": false,
+    "numerical_jitter": 0.0,
+    "hessian_chunk_size": 64,
+    "workers": 4,
+    "workers_per_gpu": 1,
+    "cpu_threads_per_worker": 4,
+    "cuda_devices": [0, 1, 2, 3],
+    "finite_penalty_rhos": [10.0, 100.0],
+    "spectral_absolute_floor": 1e-14,
+    "stationarity_absolute_tolerance": 1e-07,
+    "stationarity_relative_tolerance": 1e-07,
+    "max_memory_gib": 8.0,
+    "reference_solver": {
+      "solver": "gradient_descent",
+      "starts": 4,
+      "include_theta_star_start": true,
+      "random_scale": 0.1,
+      "learning_rate": 0.05,
+      "max_steps": 2000,
+      "gradient_tolerance": 1e-07,
+      "relative_gradient_tolerance": 1e-07,
+      "armijo_coefficient": 0.0001,
+      "backtrack_factor": 0.5,
+      "max_backtracks": 25,
+      "minimum_step": 1e-12,
+      "seed": 0
+    }
+  },
+  "gate": {
+    "enabled": true,
+    "interpolation_threshold": 0.001,
+    "failure_error_threshold": 0.1,
+    "require_interpolating": 1,
+    "require_nonfailed": 1,
+    "require_failed": 1
+  }
+}

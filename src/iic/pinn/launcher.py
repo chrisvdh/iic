@@ -566,9 +566,32 @@ def launch_plan(
             "nt": config.data.nt,
             "n_collocation": config.data.n_collocation,
             "collocation_seed": config.data.collocation_seed,
+            "collocation_sampler": config.data.collocation_sampler,
+            "nx_evaluation": config.data.nx_evaluation or config.data.nx,
+            "nt_evaluation": config.data.nt_evaluation or config.data.nt,
+            "evaluation_grid_pinned": (
+                config.data.nx_evaluation is not None
+                or config.data.nt_evaluation is not None
+            ),
         },
         "estimand": {
             "estimand_kind": mode,
+            "pde_role": config.regularizer.pde_role,
+            "constraint_blocks": _constraint_blocks(config),
+            "constraint_rows_excluding_boundary": (
+                config.data.nx
+                + (
+                    config.data.n_collocation
+                    if config.regularizer.pde_role == "constraint"
+                    else 0
+                )
+            ),
+            "boundary_rows_note": (
+                "Boundary rows are constraints and their count varies with nu "
+                "(the derivative block is dropped at nu=0)."
+                if config.regularizer.boundary_role == "constraint"
+                else "Boundary residuals are regularizer terms, not rows."
+            ),
             "boundary_role": config.regularizer.boundary_role,
             "boundary_weight": config.regularizer.boundary_weight,
             "reference_solve_enabled": mode == "full_iic" and stage != "training",
@@ -619,6 +642,17 @@ def launch_plan(
         "synchronization": _redacted_sync(sync_transport, sync_interval_seconds),
         "source": source_identity(),
     }
+
+
+def _constraint_blocks(config: PinnRunConfig) -> list[str]:
+    """Ordered names of the scalar row blocks in the constraint map."""
+
+    blocks = ["initial_data"]
+    if config.regularizer.boundary_role == "constraint":
+        blocks.extend(["boundary_value", "boundary_derivative"])
+    if config.regularizer.pde_role == "constraint":
+        blocks.append("pde_residual")
+    return blocks
 
 
 def _redacted_sync(
