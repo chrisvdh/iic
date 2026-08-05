@@ -154,6 +154,9 @@ def run_boundary_role_comparison(
             nt=config.data.nt,
             n_collocation=config.data.n_collocation,
             seed=config.data.collocation_seed,
+            collocation_sampler=config.data.collocation_sampler,
+            nx_evaluation=config.data.nx_evaluation,
+            nt_evaluation=config.data.nt_evaluation,
             device=evaluation_device,
             dtype=evaluation_dtype,
         )

@@ -10,6 +10,8 @@ import math
 from pathlib import Path
 from typing import Any, Optional, Tuple, Union
 
+from .data import COLLOCATION_SAMPLERS, DEFAULT_RNG
+
 
 @dataclass(frozen=True)
 class PinnPoint:
@@ -23,6 +25,9 @@ class DataConfig:
     nt: int
     n_collocation: int
     collocation_seed: int
+    collocation_sampler: str = DEFAULT_RNG
+    nx_evaluation: Optional[int] = None
+    nt_evaluation: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -418,11 +423,33 @@ def load_config(path: Union[str, Path]) -> PinnRunConfig:
         nt=int(_required(data_raw, "nt", int)),
         n_collocation=int(_required(data_raw, "n_collocation", int)),
         collocation_seed=int(data_raw.get("collocation_seed", 0)),
+        collocation_sampler=str(
+            data_raw.get("collocation_sampler", DEFAULT_RNG)
+        ),
+        nx_evaluation=(
+            int(data_raw["nx_evaluation"])
+            if data_raw.get("nx_evaluation") is not None
+            else None
+        ),
+        nt_evaluation=(
+            int(data_raw["nt_evaluation"])
+            if data_raw.get("nt_evaluation") is not None
+            else None
+        ),
     )
     if data.nx < 4 or data.nt < 3 or data.n_collocation < 1:
         raise ValueError("data requires nx >= 4, nt >= 3, and n_collocation >= 1")
     if data.n_collocation > (data.nx - 1) * (data.nt - 1):
         raise ValueError("n_collocation exceeds the available interior grid")
+    if data.collocation_sampler not in COLLOCATION_SAMPLERS:
+        raise ValueError(
+            "collocation_sampler must be one of "
+            f"{COLLOCATION_SAMPLERS}, got {data.collocation_sampler!r}"
+        )
+    if data.nx_evaluation is not None and data.nx_evaluation < 4:
+        raise ValueError("nx_evaluation requires at least four points")
+    if data.nt_evaluation is not None and data.nt_evaluation < 3:
+        raise ValueError("nt_evaluation requires at least three points")
 
     model_raw = _required(raw, "model", dict)
     model = ModelConfig(
