@@ -71,6 +71,101 @@ def test_selected_shards_preserve_indices_and_resume_only_existing(
     assert all(Path(row["stderr_log"]).is_file() for row in results)
 
 
+def test_launcher_pushes_each_shard_as_it_completes(tmp_path, monkeypatch):
+    from iic.pinn.sync import LocalTransport
+
+    config = load_config(ROOT / "configs" / "pinn-failure-grid.example.json")
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 2)
+
+    real_run = launcher.subprocess.run
+
+    def fake_run(command, **kwargs):
+        if command[0] == "git":
+            return real_run(command, **kwargs)
+        # Each shard process leaves a durable artifact behind before exiting.
+        index = int(command[command.index("--shard-index") + 1])
+        shard = Path(command[command.index("--output") + 1])
+        shard.mkdir(parents=True, exist_ok=True)
+        (shard / "training.json").write_text(
+            json.dumps([{"run_id": f"run-{index}", "success": True}]),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(launcher.subprocess, "run", fake_run)
+    output = tmp_path / "campaign"
+    remote = tmp_path / "remote"
+
+    summary = launch_shards(
+        config,
+        ROOT / "configs" / "pinn-failure-grid.example.json",
+        output,
+        stage="training",
+        workers=2,
+        cuda_devices=[0, 1],
+        num_shards=845,
+        shard_indices=[0, 1],
+        sync_transport=LocalTransport(root=remote),
+    )
+
+    assert summary["remote_behind"] is False
+    for index in (0, 1):
+        pushed = remote / "campaign" / f"shard-{index:04d}" / "training.json"
+        assert json.loads(pushed.read_text())[0]["run_id"] == f"run-{index}"
+    # The final whole-tree push carries the launcher-level records too.
+    assert (remote / "campaign" / "launcher_summary.json").is_file()
+    assert (remote / "campaign" / "sync_state.json").is_file()
+
+
+def test_launcher_continues_locally_when_the_remote_is_unreachable(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(ROOT / "configs" / "pinn-failure-grid.example.json")
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda command, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="{}", stderr=""
+        ),
+    )
+
+    class UnreachableTransport:
+        name = "unreachable"
+
+        def push(self, source, relative):
+            raise OSError("no route to host")
+
+        def describe(self):
+            return {"transport": self.name}
+
+    output = tmp_path / "campaign"
+    summary = launch_shards(
+        config,
+        ROOT / "configs" / "pinn-failure-grid.example.json",
+        output,
+        stage="training",
+        workers=1,
+        cuda_devices=[0],
+        num_shards=845,
+        shard_indices=[0],
+        sync_transport=UnreachableTransport(),
+        sync_policy=launcher.SyncPolicy(attempts=1, backoff_seconds=0.0),
+    )
+
+    # The run itself succeeds; only the remote copy is flagged as stale.
+    assert summary["run_status"] == "success"
+    assert summary["remote_behind"] is True
+    state = json.loads((output / "sync_state.json").read_text())
+    assert state["failed_push_count"] >= 1
+    assert any(
+        "no route to host" in (push["error"] or "") for push in state["pushes"]
+    )
+
+
 def test_launcher_forwards_forced_float64_reevaluation(tmp_path, monkeypatch):
     config = load_config(
         ROOT / "configs" / "pinn-failure-grid.example.json"

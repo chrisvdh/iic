@@ -14,6 +14,56 @@ from .pinn.config import (
 from .pinn.pipeline import run_pipeline, validate_plan
 
 
+def _add_sync_arguments(parser: argparse.ArgumentParser) -> None:
+    """Attach phone-home options. Every value also has an environment default."""
+
+    parser.add_argument(
+        "--sync-ssh-host",
+        help="Phone-home SSH host; defaults to IIC_SYNC_SSH_HOST.",
+    )
+    parser.add_argument(
+        "--sync-ssh-port",
+        type=int,
+        help="Phone-home SSH port; defaults to IIC_SYNC_SSH_PORT.",
+    )
+    parser.add_argument(
+        "--sync-ssh-dest",
+        help="Remote base directory; defaults to IIC_SYNC_SSH_DEST.",
+    )
+    parser.add_argument(
+        "--sync-local-dest",
+        type=Path,
+        help=(
+            "Copy to a local or attached directory instead of SSH; defaults "
+            "to IIC_SYNC_LOCAL_DEST. Takes precedence over the SSH transport."
+        ),
+    )
+    parser.add_argument("--sync-attempts", type=int, default=3)
+    parser.add_argument("--sync-backoff-seconds", type=float, default=2.0)
+
+
+def _sync_from_args(args: argparse.Namespace):
+    """Resolve the transport and retry policy, or ``None`` when unconfigured."""
+
+    from .pinn.sync import SyncPolicy, transport_from_environment
+
+    transport = transport_from_environment(
+        host=getattr(args, "sync_ssh_host", None),
+        port=getattr(args, "sync_ssh_port", None),
+        destination=getattr(args, "sync_ssh_dest", None),
+        local_root=getattr(args, "sync_local_dest", None),
+    )
+    policy = SyncPolicy(
+        attempts=getattr(args, "sync_attempts", None) or 3,
+        backoff_seconds=(
+            getattr(args, "sync_backoff_seconds", None)
+            if getattr(args, "sync_backoff_seconds", None) is not None
+            else 2.0
+        ),
+    )
+    return transport, policy
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="iic")
     domains = parser.add_subparsers(dest="domain", required=True)
@@ -112,6 +162,29 @@ def _parser() -> argparse.ArgumentParser:
     launch.add_argument("--measured-gpu-worker-peak-gib", type=float)
     launch.add_argument("--measured-host-worker-peak-gib", type=float)
     launch.add_argument("--memory-reserve-fraction", type=float, default=0.15)
+    _add_sync_arguments(launch)
+    status = actions.add_parser(
+        "status",
+        help="Report campaign progress from a local or synced output tree.",
+    )
+    status.add_argument("--config", type=Path, required=True)
+    status.add_argument("--output", type=Path, required=True)
+    status.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the full status record instead of the operator report.",
+    )
+    sync = actions.add_parser(
+        "sync",
+        help="Push an existing campaign output tree to the sync destination.",
+    )
+    sync.add_argument("--output", type=Path, required=True)
+    sync.add_argument(
+        "--relative",
+        default=".",
+        help="Subtree of the output directory to push (default: everything).",
+    )
+    _add_sync_arguments(sync)
     calibrate = actions.add_parser(
         "calibrate",
         help="Run selected real shards and summarize throughput and parity.",
@@ -200,6 +273,7 @@ def main() -> None:
             from .pinn.launcher import launch_shards
 
             config = load_pinn_config(args.config)
+            sync_transport, sync_policy = _sync_from_args(args)
             launch_result = launch_shards(
                 config,
                 args.config,
@@ -227,6 +301,8 @@ def main() -> None:
                     args.measured_host_worker_peak_gib
                 ),
                 memory_reserve_fraction=args.memory_reserve_fraction,
+                sync_transport=sync_transport,
+                sync_policy=sync_policy,
             )
             if args.action == "calibrate":
                 from .pinn.calibration import (
@@ -278,6 +354,31 @@ def main() -> None:
                 ),
                 memory_reserve_fraction=args.memory_reserve_fraction,
             )
+        elif args.action == "status":
+            from .pinn.status import campaign_status, format_status
+
+            config = load_pinn_config(args.config)
+            result = campaign_status(config, args.output)
+            if not args.json:
+                print(format_status(result))
+                return
+        elif args.action == "sync":
+            from .pinn.sync import CampaignSync
+
+            sync_transport, sync_policy = _sync_from_args(args)
+            if sync_transport is None:
+                raise ValueError(
+                    "no synchronization destination configured; pass "
+                    "--sync-ssh-host/--sync-ssh-dest or --sync-local-dest, or "
+                    "set IIC_SYNC_SSH_HOST/IIC_SYNC_SSH_DEST"
+                )
+            campaign_sync = CampaignSync(
+                args.output,
+                sync_transport,
+                policy=sync_policy,
+            )
+            campaign_sync.push_tree(args.relative)
+            result = campaign_sync.state()
         elif args.action == "merge":
             from .pinn.merge import merge_shards
 

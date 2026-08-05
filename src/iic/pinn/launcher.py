@@ -21,6 +21,7 @@ from iic.provenance import source_identity
 from iic.telemetry import ResourceMonitor, host_total_memory_bytes
 from .config import PinnRunConfig, apply_evaluation_runtime_overrides
 from .pipeline import _atomic_json
+from .sync import CampaignSync, SyncPolicy, SyncTransport
 
 
 def launch_shards(
@@ -47,6 +48,8 @@ def launch_shards(
     measured_gpu_worker_peak_gib: Optional[float] = None,
     measured_host_worker_peak_gib: Optional[float] = None,
     memory_reserve_fraction: float = 0.15,
+    sync_transport: Optional[SyncTransport] = None,
+    sync_policy: Optional[SyncPolicy] = None,
 ) -> dict[str, Any]:
     """Launch isolated shard processes on fixed, capacity-limited slots."""
 
@@ -193,6 +196,16 @@ def launch_shards(
         "source": source_identity(),
         "allow_source_mismatch": allow_source_mismatch,
     }
+    campaign_sync = CampaignSync(
+        output,
+        sync_transport,
+        policy=sync_policy,
+    )
+    manifest["synchronization"] = (
+        campaign_sync.transport.describe()
+        if campaign_sync.enabled
+        else None
+    )
     _atomic_json(output / "launcher_manifest.json", manifest)
 
     def run(assignment: dict[str, Any]) -> dict[str, Any]:
@@ -338,8 +351,16 @@ def launch_shards(
                             ),
                         ),
                     )
+                    # Refill the slot before pushing so the accelerator is not
+                    # idle for the duration of a network transfer.
                     if work_queue and not stop_requested.is_set():
                         dispatch(slot)
+                    if campaign_sync.enabled:
+                        shard_index = result.get("shard_index")
+                        if shard_index is not None:
+                            campaign_sync.push_tree(
+                                f"shard-{int(shard_index):04d}"
+                            )
     finally:
         if monitor is not None:
             monitor.stop()
@@ -389,6 +410,11 @@ def launch_shards(
         "memory_guard": memory_guard,
         "telemetry_path": str(telemetry_path) if telemetry_path else None,
     }
+    _atomic_json(output / "launcher_summary.json", summary)
+    if campaign_sync.enabled:
+        campaign_sync.push_tree(".")
+    summary["synchronization"] = campaign_sync.state()
+    summary["remote_behind"] = summary["synchronization"]["remote_behind"]
     _atomic_json(output / "launcher_summary.json", summary)
     return summary
 
