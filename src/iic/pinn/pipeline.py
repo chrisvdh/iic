@@ -21,7 +21,7 @@ from iic.reference import ReferencePoint, ReferenceSolveOptions, solve_reference
 from iic.telemetry import PhaseTimer, peak_memory_record, reset_cuda_peak_memory
 from iic.volume import VolumeOptions
 from .config import PinnRunConfig
-from .data import make_data
+from .data import combined_fingerprint, make_data
 from .model import MLP, initialize_he_gaussian
 from .problem import build_functions, evaluation_problem
 from .train import seed_everything, train
@@ -246,6 +246,8 @@ def _checkpoint_manifest(
     data_fingerprint: str,
     parameter_fingerprint: str,
     evaluation_mode: str,
+    training_data_fingerprint: str = "",
+    evaluation_data_fingerprint: str = "",
     model_seed: int,
     source: dict[str, Any],
 ) -> dict[str, Any]:
@@ -255,6 +257,8 @@ def _checkpoint_manifest(
         "role": role,
         "parameter_fingerprint": parameter_fingerprint,
         "data_fingerprint": data_fingerprint,
+        "training_data_fingerprint": training_data_fingerprint,
+        "evaluation_data_fingerprint": evaluation_data_fingerprint,
         "config_fingerprint": config.fingerprint,
         "source": source,
         "model_seed": model_seed,
@@ -778,6 +782,10 @@ def run_pipeline(
                             model=model,
                             config=config,
                             data_fingerprint=data.fingerprint,
+                            training_data_fingerprint=data.training_fingerprint,
+                            evaluation_data_fingerprint=(
+                                data.evaluation_fingerprint
+                            ),
                             parameter_fingerprint=parameter_fingerprint,
                             evaluation_mode=evaluation_mode,
                             model_seed=seed,
@@ -950,9 +958,33 @@ def run_pipeline(
                 checkpoint_data_fingerprint = parameter_manifest.get(
                     "data_fingerprint"
                 )
-                data_fingerprint_match = (
-                    checkpoint_data_fingerprint == data.fingerprint
+                # Reuse keys on the training inputs. The evaluation grid feeds
+                # only the test-error metric, so pinning it across campaigns
+                # must not invalidate a checkpoint. Manifests written before
+                # the split carry only the combined digest.
+                checkpoint_training_fingerprint = parameter_manifest.get(
+                    "training_data_fingerprint"
                 )
+                if checkpoint_training_fingerprint is not None:
+                    # The manifest must also be internally consistent: its
+                    # combined digest has to be the one its own two halves
+                    # produce, so a tampered or hand-edited field is caught.
+                    checkpoint_evaluation_fingerprint = parameter_manifest.get(
+                        "evaluation_data_fingerprint", ""
+                    )
+                    data_fingerprint_match = (
+                        checkpoint_training_fingerprint
+                        == data.training_fingerprint
+                        and checkpoint_data_fingerprint
+                        == combined_fingerprint(
+                            checkpoint_training_fingerprint,
+                            checkpoint_evaluation_fingerprint,
+                        )
+                    )
+                else:
+                    data_fingerprint_match = (
+                        checkpoint_data_fingerprint == data.fingerprint
+                    )
                 if not data_fingerprint_match and not allow_data_mismatch:
                     raise ValueError("checkpoint data fingerprint does not match")
                 checkpoint_source = parameter_manifest.get("source", {}).get(

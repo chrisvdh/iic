@@ -137,6 +137,22 @@ def train(
         )
 
     model.eval()
+    theta_star, metrics = checkpoint_metrics(model, data, functions)
+    return TrainingResult(
+        theta_star=theta_star,
+        training_seconds=float(time.perf_counter() - started),
+        optimizer_phases=tuple(phase_records),
+        **metrics,
+    )
+
+
+def checkpoint_metrics(model, data, functions):
+    """Losses, residuals, and test error at the model's current parameters.
+
+    Shared by training and by checkpoint import, so an imported checkpoint is
+    scored by exactly the definitions a freshly trained one is.
+    """
+
     theta_star = flatten_parameters(model)
     data_residuals = functions.data_constraint_fn(theta_star)
     boundary_residuals = functions.boundary_residual_fn(theta_star)
@@ -158,22 +174,21 @@ def train(
         denominator = torch.linalg.vector_norm(data.evaluation_values)
         relative_error = torch.linalg.vector_norm(difference) / denominator
 
-    return TrainingResult(
-        theta_star=theta_star.detach(),
-        loss_constraint=float(loss_constraint.detach()),
-        loss_data=float(loss_data.detach()),
-        loss_boundary=float(loss_boundary.detach()),
-        loss_data_boundary=float(loss_data_boundary.detach()),
-        loss_pde=float(loss_pde.detach()),
-        data_residual=float(
+    return theta_star.detach(), {
+        "loss_constraint": float(loss_constraint.detach()),
+        "loss_data": float(loss_data.detach()),
+        "loss_boundary": float(loss_boundary.detach()),
+        "loss_data_boundary": float(loss_data_boundary.detach()),
+        "loss_pde": float(loss_pde.detach()),
+        "data_residual": float(
             torch.linalg.vector_norm(data_residuals.detach()) / math.sqrt(2.0)
         ),
-        boundary_residual=float(
+        "boundary_residual": float(
             torch.linalg.vector_norm(boundary_residuals.detach()) / math.sqrt(2.0)
         ),
-        interp_residual=float(torch.linalg.vector_norm(constraints.detach()) / math.sqrt(2.0)),
-        relative_error=float(relative_error),
-        terminal_gradient_norm=float(terminal_gradient_norm),
-        training_seconds=float(time.perf_counter() - started),
-        optimizer_phases=tuple(phase_records),
-    )
+        "interp_residual": float(
+            torch.linalg.vector_norm(constraints.detach()) / math.sqrt(2.0)
+        ),
+        "relative_error": float(relative_error),
+        "terminal_gradient_norm": float(terminal_gradient_norm),
+    }

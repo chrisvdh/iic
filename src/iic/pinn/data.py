@@ -166,9 +166,6 @@ def make_data(
         collocation,
     )
     evaluation_fingerprint = _digest(evaluation_coords, evaluation_values)
-    combined = hashlib.sha256()
-    combined.update(training_fingerprint.encode("ascii"))
-    combined.update(evaluation_fingerprint.encode("ascii"))
 
     def tensor(value: np.ndarray) -> torch.Tensor:
         return torch.as_tensor(value, device=device, dtype=dtype)
@@ -181,11 +178,22 @@ def make_data(
         collocation_coords=tensor(collocation),
         evaluation_coords=tensor(evaluation_coords),
         evaluation_values=tensor(evaluation_values),
-        fingerprint=combined.hexdigest(),
+        fingerprint=combined_fingerprint(
+            training_fingerprint, evaluation_fingerprint
+        ),
         training_fingerprint=training_fingerprint,
         evaluation_fingerprint=evaluation_fingerprint,
         collocation_sampler=collocation_sampler,
     )
+
+
+def combined_fingerprint(training: str, evaluation: str) -> str:
+    """Combine the two halves into the digest recorded as ``data_fingerprint``."""
+
+    digest = hashlib.sha256()
+    digest.update(training.encode("ascii"))
+    digest.update(evaluation.encode("ascii"))
+    return digest.hexdigest()
 
 
 def _digest(*values: np.ndarray) -> str:

@@ -185,6 +185,29 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     _add_sync_arguments(launch)
+    import_legacy = actions.add_parser(
+        "import-checkpoints",
+        help="Import a historical sweep's checkpoints into a campaign tree.",
+    )
+    import_legacy.add_argument("--config", type=Path, required=True)
+    import_legacy.add_argument("--legacy-dir", type=Path, required=True)
+    import_legacy.add_argument("--output", type=Path, required=True)
+    import_legacy.add_argument("--num-shards", type=int, required=True)
+    import_legacy.add_argument("--shard-indices", type=int, nargs="+")
+    import_legacy.add_argument(
+        "--generating-script",
+        required=True,
+        help="Script that produced the checkpoints; recorded in every manifest.",
+    )
+    import_legacy.add_argument(
+        "--recorded-invocation",
+        required=True,
+        help="The invocation that produced them; recorded in every manifest.",
+    )
+    import_legacy.add_argument(
+        "--documented-in",
+        help="Where that invocation is written down.",
+    )
     status = actions.add_parser(
         "status",
         help="Report campaign progress from a local or synced output tree.",
@@ -413,6 +436,24 @@ def main() -> None:
                     args.measured_host_worker_peak_gib
                 ),
                 memory_reserve_fraction=args.memory_reserve_fraction,
+            )
+        elif args.action == "import-checkpoints":
+            from .pinn.legacy_import import import_campaign
+
+            config = load_pinn_config(args.config)
+            provenance = {
+                "generating_script": args.generating_script,
+                "recorded_invocation": args.recorded_invocation,
+            }
+            if args.documented_in:
+                provenance["documented_in"] = args.documented_in
+            result = import_campaign(
+                config,
+                args.legacy_dir,
+                args.output,
+                num_shards=args.num_shards,
+                provenance=provenance,
+                shard_indices=args.shard_indices,
             )
         elif args.action == "status":
             from .pinn.status import campaign_status, format_status
