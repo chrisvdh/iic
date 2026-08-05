@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
+import json
 import math
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -50,6 +52,8 @@ def launch_shards(
     memory_reserve_fraction: float = 0.15,
     sync_transport: Optional[SyncTransport] = None,
     sync_policy: Optional[SyncPolicy] = None,
+    sync_interval_seconds: float = 300.0,
+    force_unlock: bool = False,
 ) -> dict[str, Any]:
     """Launch isolated shard processes on fixed, capacity-limited slots."""
 
@@ -117,6 +121,7 @@ def launch_shards(
             )
 
     output.mkdir(parents=True, exist_ok=resume)
+    lock_identity = _claim_output_lock(output, force=force_unlock)
     cuda_required = _cuda_required(config)
     devices = _cuda_devices(
         config,
@@ -323,12 +328,25 @@ def launch_shards(
                     break
                 dispatch(slot)
 
+            last_periodic_push = time.monotonic()
             while active:
                 completed, _ = wait(
                     active,
                     timeout=0.5,
                     return_when=FIRST_COMPLETED,
                 )
+                # Durability must not depend on shard sizing. A long-running
+                # shard would otherwise reach the remote only when it finishes,
+                # which on a pre-emptible instance can be never.
+                _refresh_output_lock(output, lock_identity)
+                if (
+                    campaign_sync.enabled
+                    and sync_interval_seconds > 0
+                    and time.monotonic() - last_periodic_push
+                    >= sync_interval_seconds
+                ):
+                    campaign_sync.push_tree(".")
+                    last_periodic_push = time.monotonic()
                 for future in completed:
                     slot, assignment = active.pop(future)
                     try:
@@ -366,6 +384,7 @@ def launch_shards(
             monitor.stop()
         for signum, handler in old_handlers.items():
             signal.signal(signum, handler)
+        _release_output_lock(output, lock_identity)
 
     elapsed = time.perf_counter() - started
     results.sort(
@@ -417,6 +436,112 @@ def launch_shards(
     summary["remote_behind"] = summary["synchronization"]["remote_behind"]
     _atomic_json(output / "launcher_summary.json", summary)
     return summary
+
+
+LOCK_FILENAME = "launcher_lock.json"
+LOCK_STALE_AFTER_SECONDS = 120.0
+
+
+def _claim_output_lock(
+    output: Path,
+    *,
+    force: bool = False,
+    stale_after_seconds: float = LOCK_STALE_AFTER_SECONDS,
+) -> dict[str, Any]:
+    """Claim exclusive ownership of a campaign output tree.
+
+    Two launchers writing one tree interleave their shard state, so the second
+    one must refuse rather than corrupt the first. A pre-empted launcher cannot
+    clean up after itself, so a lock is reclaimable: immediately when its owner
+    is a dead process on this host, and otherwise once its heartbeat goes cold.
+    """
+
+    path = output / LOCK_FILENAME
+    identity = {
+        "hostname": socket.gethostname(),
+        "pid": os.getpid(),
+        "acquired_at": datetime.now(timezone.utc).isoformat(),
+        "heartbeat_at": time.time(),
+    }
+    for _attempt in range(2):
+        try:
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            existing = _read_lock(path)
+            reason = _stale_lock_reason(
+                existing,
+                stale_after_seconds=stale_after_seconds,
+            )
+            if force or reason is not None:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            raise RuntimeError(
+                f"another launcher holds {path}: "
+                f"host={existing.get('hostname')} pid={existing.get('pid')} "
+                f"acquired_at={existing.get('acquired_at')}. Stop it, wait "
+                f"{stale_after_seconds:g}s for the lock to go stale, or pass "
+                "force_unlock=True if you are certain it is gone."
+            )
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(identity, stream)
+        return identity
+    raise RuntimeError(f"could not claim the launcher lock at {path}")
+
+
+def _refresh_output_lock(output: Path, identity: dict[str, Any]) -> None:
+    identity["heartbeat_at"] = time.time()
+    _atomic_json(output / LOCK_FILENAME, identity)
+
+
+def _release_output_lock(output: Path, identity: dict[str, Any]) -> None:
+    path = output / LOCK_FILENAME
+    existing = _read_lock(path)
+    if (
+        existing.get("pid") == identity["pid"]
+        and existing.get("hostname") == identity["hostname"]
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _read_lock(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _stale_lock_reason(
+    existing: dict[str, Any],
+    *,
+    stale_after_seconds: float,
+) -> Optional[str]:
+    if not existing:
+        return "unreadable lock record"
+    pid = existing.get("pid")
+    if existing.get("hostname") == socket.gethostname() and isinstance(pid, int):
+        # Same host, so process liveness is decisive and a restart after
+        # pre-emption need not wait out the heartbeat window.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return f"owning process {pid} is gone"
+        except PermissionError:
+            return None
+        else:
+            return None
+    heartbeat = existing.get("heartbeat_at")
+    if not isinstance(heartbeat, (int, float)):
+        return "lock record has no heartbeat"
+    if time.time() - heartbeat > stale_after_seconds:
+        return "heartbeat is stale"
+    return None
 
 
 def runtime_inventory(

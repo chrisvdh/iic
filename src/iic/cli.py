@@ -40,6 +40,15 @@ def _add_sync_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--sync-attempts", type=int, default=3)
     parser.add_argument("--sync-backoff-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--sync-interval-seconds",
+        type=float,
+        default=300.0,
+        help=(
+            "Push the whole tree on this cadence so durability does not depend "
+            "on shard sizing. Zero disables the periodic push."
+        ),
+    )
 
 
 def _sync_from_args(args: argparse.Namespace):
@@ -162,6 +171,14 @@ def _parser() -> argparse.ArgumentParser:
     launch.add_argument("--measured-gpu-worker-peak-gib", type=float)
     launch.add_argument("--measured-host-worker-peak-gib", type=float)
     launch.add_argument("--memory-reserve-fraction", type=float, default=0.15)
+    launch.add_argument(
+        "--force-unlock",
+        action="store_true",
+        help=(
+            "Take over the output tree's launcher lock. Only use this when the "
+            "previous launcher is certainly gone."
+        ),
+    )
     _add_sync_arguments(launch)
     status = actions.add_parser(
         "status",
@@ -303,6 +320,10 @@ def main() -> None:
                 memory_reserve_fraction=args.memory_reserve_fraction,
                 sync_transport=sync_transport,
                 sync_policy=sync_policy,
+                sync_interval_seconds=getattr(
+                    args, "sync_interval_seconds", 300.0
+                ),
+                force_unlock=getattr(args, "force_unlock", False),
             )
             if args.action == "calibrate":
                 from .pinn.calibration import (

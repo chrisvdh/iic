@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from iic.pinn.config import load_config
 from iic.pinn.launcher import launch_shards, runtime_inventory
 import iic.pinn.launcher as launcher
@@ -164,6 +166,121 @@ def test_launcher_continues_locally_when_the_remote_is_unreachable(
     assert any(
         "no route to host" in (push["error"] or "") for push in state["pushes"]
     )
+
+
+def test_second_launcher_refuses_a_live_output_tree(tmp_path):
+    output = tmp_path / "campaign"
+    output.mkdir()
+    first = launcher._claim_output_lock(output)
+
+    with pytest.raises(RuntimeError, match="another launcher holds"):
+        launcher._claim_output_lock(output)
+
+    launcher._release_output_lock(output, first)
+    # Once released the tree is claimable again.
+    launcher._claim_output_lock(output)
+
+
+def test_lock_from_a_dead_process_on_this_host_is_reclaimed_immediately(
+    tmp_path,
+):
+    output = tmp_path / "campaign"
+    output.mkdir()
+    # A pre-empted launcher cannot clean up; its lock names a pid that is gone.
+    (output / launcher.LOCK_FILENAME).write_text(
+        json.dumps(
+            {
+                "hostname": launcher.socket.gethostname(),
+                "pid": 2**22,
+                "acquired_at": "2026-08-05T00:00:00Z",
+                "heartbeat_at": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = launcher._claim_output_lock(output)
+
+    assert identity["pid"] == launcher.os.getpid()
+
+
+def test_lock_from_another_host_is_reclaimed_only_once_it_goes_cold(tmp_path):
+    output = tmp_path / "campaign"
+    output.mkdir()
+
+    def write_lock(heartbeat_age: float) -> None:
+        (output / launcher.LOCK_FILENAME).write_text(
+            json.dumps(
+                {
+                    "hostname": "some-other-node",
+                    "pid": 1234,
+                    "acquired_at": "2026-08-05T00:00:00Z",
+                    "heartbeat_at": time.time() - heartbeat_age,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_lock(heartbeat_age=1.0)
+    with pytest.raises(RuntimeError, match="another launcher holds"):
+        launcher._claim_output_lock(output, stale_after_seconds=120.0)
+
+    write_lock(heartbeat_age=600.0)
+    assert launcher._claim_output_lock(output, stale_after_seconds=120.0)
+
+
+def test_force_unlock_takes_over_a_live_lock(tmp_path):
+    output = tmp_path / "campaign"
+    output.mkdir()
+    launcher._claim_output_lock(output)
+
+    identity = launcher._claim_output_lock(output, force=True)
+
+    assert identity["pid"] == launcher.os.getpid()
+
+
+def test_periodic_push_does_not_wait_for_a_shard_to_finish(
+    tmp_path,
+    monkeypatch,
+):
+    from iic.pinn.sync import LocalTransport
+
+    config = load_config(ROOT / "configs" / "pinn-failure-grid.example.json")
+    monkeypatch.setattr(launcher.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(launcher.torch.cuda, "device_count", lambda: 1)
+    real_run = launcher.subprocess.run
+
+    def slow_run(command, **kwargs):
+        if command[0] == "git":
+            return real_run(command, **kwargs)
+        shard = Path(command[command.index("--output") + 1])
+        shard.mkdir(parents=True, exist_ok=True)
+        (shard / "training.json").write_text("[]", encoding="utf-8")
+        time.sleep(0.4)
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(launcher.subprocess, "run", slow_run)
+    output = tmp_path / "campaign"
+    remote = tmp_path / "remote"
+
+    summary = launch_shards(
+        config,
+        ROOT / "configs" / "pinn-failure-grid.example.json",
+        output,
+        stage="training",
+        workers=1,
+        cuda_devices=[0],
+        num_shards=845,
+        shard_indices=[0],
+        sync_transport=LocalTransport(root=remote),
+        sync_interval_seconds=0.05,
+    )
+
+    pushes = summary["synchronization"]["pushes"]
+    periodic = [push for push in pushes if push["relative"] == "."]
+    # At least one whole-tree push landed while the shard was still running,
+    # in addition to the final one.
+    assert len(periodic) >= 2
 
 
 def test_launcher_forwards_forced_float64_reevaluation(tmp_path, monkeypatch):
